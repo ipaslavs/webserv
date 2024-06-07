@@ -17,7 +17,7 @@ servers:
         upload_dir: ./web/uploads/example1/put_test
       - url: /cgi-bin/script
         methods: [POST, GET]
-        cgi_path: ./cgi_test
+        cgi_path: ./cgi_tester_py
       - url: /post_body
         methods: [POST]
         max_body: 100
