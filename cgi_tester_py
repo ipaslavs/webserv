@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+def main():
+    content_length = os.environ.get('CONTENT_LENGTH')
+    if content_length is not None:
+        content_length = int(content_length)
+        body = sys.stdin.read(content_length)
+    else:
+        content_length = 0
+        body = ""
+        while True:
+            chunk_size_str = sys.stdin.readline().strip()
+            if chunk_size_str == '':
+                break
+            chunk_size = int(chunk_size_str, 16)
+            if chunk_size == 0:
+                break
+            body += sys.stdin.read(chunk_size)
+            sys.stdin.read(2)  # Read the trailing \r\n
+        content_length = len(body)
+
+    if content_length:
+        print("Content-Type: text/html")
+        print()
+ #       print("<html><body>")
+  #      print("<h1>CGI Script Output</h1>")
+  #      print(f"<p>Received {content_length} bytes of data.</p>")
+  #      print("</body></html>")
+    else:
+        print("Content-Type: text/html")
+        print()
+        print("<html><body>")
+        print("<h1>No data received</h1>")
+        print("</body></html>")
+
+if __name__ == "__main__":
+    main()

@@ -7,13 +7,7 @@ SRCDIR = srcs
 INCDIR = includes
 
 # Source files
-SRCS = $(SRCDIR)/HttpRequest.cpp \
-       $(SRCDIR)/HttpResponse.cpp \
-       $(SRCDIR)/HttpServer.cpp \
-       $(SRCDIR)/main.cpp \
-       $(SRCDIR)/CGIHandler.cpp \
-       $(SRCDIR)/FileUploadHandler.cpp \
-       $(SRCDIR)/helpers.cpp
+SRCS = $(SRCDIR)/*.cpp
 
 # Executable name
 NAME = webserv
