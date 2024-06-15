@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <signal.h>
+#include <map>
 
 #define BUFFER_SIZE 1024
 #define MAX_CLIENTS 1024
@@ -29,6 +30,18 @@ WebServer::WebServer(const std::vector<ServerConfig> &configs)
         fds[nfds].fd = server_fds[i];
         fds[nfds].events = POLLIN;
         nfds++;
+    }
+}
+
+void setNonBlocking(int socket) {
+    int flags = fcntl(socket, F_GETFL, 0);
+    if (flags == -1) {
+        perror("fcntl F_GETFL");
+        exit(EXIT_FAILURE);
+    }
+    if (fcntl(socket, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl F_SETFL");
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -63,10 +76,11 @@ void WebServer::bindSocket(int &server_fd, int port) {
         exit(EXIT_FAILURE);
     }
 
+    setNonBlocking(server_fd);
+
     std::cout << "Server listening on port " << port << std::endl;
 }
 
-// Define a traditional function to check if the file descriptor is -1
 bool is_closed_socket(const struct pollfd &pfd) {
     return pfd.fd == -1;
 }
@@ -87,21 +101,19 @@ void WebServer::run() {
                     socklen_t addrlen = sizeof(address);
                     int new_socket;
 
-                    if ((new_socket = accept(fds[i].fd, (struct sockaddr *)&address, &addrlen)) < 0) {
-                        perror("accept");
-                        exit(EXIT_FAILURE);
+                    while ((new_socket = accept(fds[i].fd, (struct sockaddr *)&address, &addrlen)) >= 0) {
+                        std::cout << "New connection on socket " << new_socket << std::endl;
+
+                        setNonBlocking(new_socket);
+
+                        fds[nfds].fd = new_socket;
+                        fds[nfds].events = POLLIN;
+                        nfds++;
+
+                        client_server_map[new_socket] = i;
                     }
-                    std::cout << "New connection on socket " << new_socket << std::endl;
-
-                    fds[nfds].fd = new_socket;
-                    fds[nfds].events = POLLIN;
-                    nfds++;
-
-                    client_server_map[new_socket] = i;
                 } else {
                     handleClient(fds[i].fd);
-                    close(fds[i].fd);
-                    fds[i].fd = -1;
                 }
             }
         }
@@ -110,13 +122,11 @@ void WebServer::run() {
     }
 }
 
-
 std::string intToString(int value) {
     std::stringstream ss;
     ss << value;
     return ss.str();
 }
-
 
 std::string getMimeType(const std::string &path) {
     if (path.find(".html") != std::string::npos) return "text/html";
@@ -192,349 +202,339 @@ std::string generateDirectoryListing(const std::string &path, const std::string 
 }
 
 void WebServer::handleClient(int client_fd) {
- char buffer[BUFFER_SIZE] = {0};
-    std::string request;
+    static std::map<int, std::string> requests;
+    char buffer[BUFFER_SIZE] = {0};
     int valread;
 
-    try {
-        while ((valread = read(client_fd, buffer, BUFFER_SIZE - 1)) > 0) {
-            buffer[valread] = '\0';
-            request += buffer;
-            if (request.find("\r\n\r\n") != std::string::npos) {
-                break;
-            }
+    while ((valread = read(client_fd, buffer, BUFFER_SIZE - 1)) > 0) {
+        buffer[valread] = '\0';
+        requests[client_fd] += buffer;
+        if (requests[client_fd].find("\r\n\r\n") != std::string::npos) {
+            break;
         }
+    }
 
-        if (valread <= 0) {
-            if (valread == 0) {
-                std::cout << "Client disconnected from socket " << client_fd << std::endl;
-            } else {
-                throw std::runtime_error("Error reading from socket " + intToString(client_fd));
-            }
-            close(client_fd);
-            return;
+    if (valread < 0) {
+        // read would block, so return and try later
+        return;
+    }
+
+    if (valread == 0) {
+        std::cout << "Client disconnected from socket " << client_fd << std::endl;
+        close(client_fd);
+        requests.erase(client_fd);
+        return;
+    }
+
+    std::string request = requests[client_fd];
+
+    std::cout << "Received: " << request << std::endl;
+
+    std::istringstream request_stream(request);
+    std::string method, url, http_version;
+    request_stream >> method >> url >> http_version;
+
+    std::string body;
+    std::string content_length;
+    std::string content_type;
+    std::string query_string;
+    std::string transfer_encoding;
+
+    std::string line;
+    size_t pos;
+    size_t headers_end = request.find("\r\n\r\n");
+    std::istringstream headers_stream(request.substr(0, headers_end));
+    while (std::getline(headers_stream, line) && line != "\r") {
+        if ((pos = line.find("Content-Length: ")) != std::string::npos) {
+            content_length = line.substr(pos + 16);
+            content_length = content_length.substr(0, content_length.find("\r"));
+        } else if ((pos = line.find("Content-Type: ")) != std::string::npos) {
+            content_type = line.substr(pos + 14);
+            content_type = content_type.substr(0, content_type.find("\r"));
+        } else if ((pos = line.find("Transfer-Encoding: ")) != std::string::npos) {
+            transfer_encoding = line.substr(pos + 19);
+            transfer_encoding = transfer_encoding.substr(0, transfer_encoding.find("\r"));
         }
+    }
 
-        std::cout << "Received: " << request << std::endl;
+    pos = url.find('?');
+    if (pos != std::string::npos) {
+        query_string = url.substr(pos + 1);
+        url = url.substr(0, pos);
+    }
 
-        std::istringstream request_stream(request);
-        std::string method, url, http_version;
-        request_stream >> method >> url >> http_version;
+    std::map<int, int>::const_iterator it = client_server_map.find(client_fd);
+    if (it == client_server_map.end()) {
+        throw std::runtime_error("Unknown socket " + intToString(client_fd));
+    }
+    const ServerConfig &config = configs[it->second];
 
-        std::string body;
-        std::string content_length;
-        std::string content_type;
-        std::string query_string;
-        std::string transfer_encoding;
-
-        std::string line;
-        size_t pos;
-        size_t headers_end = request.find("\r\n\r\n");
-        std::istringstream headers_stream(request.substr(0, headers_end));
-        while (std::getline(headers_stream, line) && line != "\r") {
-            if ((pos = line.find("Content-Length: ")) != std::string::npos) {
-                content_length = line.substr(pos + 16);
-                content_length = content_length.substr(0, content_length.find("\r"));
-            } else if ((pos = line.find("Content-Type: ")) != std::string::npos) {
-                content_type = line.substr(pos + 14);
-                content_type = content_type.substr(0, content_type.find("\r"));
-            } else if ((pos = line.find("Transfer-Encoding: ")) != std::string::npos) {
-                transfer_encoding = line.substr(pos + 19);
-                transfer_encoding = transfer_encoding.substr(0, transfer_encoding.find("\r"));
-            }
+    std::cout << "Routes for server on port " << config.port << ":" << std::endl;
+    for (size_t i = 0; i < config.routes.size(); ++i) {
+        const RouteConfig &route = config.routes[i];
+        std::cout << "Route: URL = '" << route.url << "', Methods = [";
+        for (size_t j = 0; j < route.methods.size(); ++j) {
+            std::cout << route.methods[j] << ", ";
         }
+        std::cout << "], Root = '" << route.root << "', Index = '" << route.index << "', AutoIndex = '" << (route.autoindex ? "on" : "off") << "', Alias = '" << route.alias << "', Max Body = '" << route.max_body << "'" << std::endl;
+    }
 
-        pos = url.find('?');
-        if (pos != std::string::npos) {
-            query_string = url.substr(pos + 1);
-            url = url.substr(0, pos);
+    const RouteConfig* best_match_route = NULL;
+    size_t longest_match_length = 0;
+
+    for (size_t i = 0; i < config.routes.size(); ++i) {
+        const RouteConfig &route = config.routes[i];
+        if (url.find(route.url) == 0 && route.url.size() > longest_match_length) {
+            best_match_route = &route;
+            longest_match_length = route.url.size();
+        } else if (url.size() >= 4 && url.substr(url.size() - 4) == ".bla" && route.url == ".bla") {
+            best_match_route = &route;
+            longest_match_length = route.url.size();
         }
+    }
 
-        std::map<int, int>::const_iterator it = client_server_map.find(client_fd);
-        if (it == client_server_map.end()) {
-            throw std::runtime_error("Unknown socket " + intToString(client_fd));
+    if (!best_match_route) {
+        std::cerr << "Route not found for URL: " << url << std::endl;
+        std::string error_response = getErrorPage(config, 404);
+        if (error_response.empty()) {
+            error_response = getDefaultErrorPage(404);
         }
-        const ServerConfig &config = configs[it->second];
-
-        std::cout << "Routes for server on port " << config.port << ":" << std::endl;
-        for (size_t i = 0; i < config.routes.size(); ++i) {
-            const RouteConfig &route = config.routes[i];
-            std::cout << "Route: URL = '" << route.url << "', Methods = [";
-            for (size_t j = 0; j < route.methods.size(); ++j) {
-                std::cout << route.methods[j] << ", ";
-            }
-            std::cout << "], Root = '" << route.root << "', Index = '" << route.index << "', AutoIndex = '" << (route.autoindex ? "on" : "off") << "', Alias = '" << route.alias << "', Max Body = '" << route.max_body << "'" << std::endl;
-        }
-
-        const RouteConfig* best_match_route = NULL;
-        size_t longest_match_length = 0;
-
-        for (size_t i = 0; i < config.routes.size(); ++i) {
-            const RouteConfig &route = config.routes[i];
-            if (url.find(route.url) == 0 && route.url.size() > longest_match_length) {
-                best_match_route = &route;
-                longest_match_length = route.url.size();
-            } else if (url.size() >= 4 && url.substr(url.size() - 4) == ".bla" && route.url == ".bla") {
-                best_match_route = &route;
-                longest_match_length = route.url.size();
-            }
-        }
-
-        if (!best_match_route) {
-            std::cerr << "Route not found for URL: " << url << std::endl;
-            std::string error_response = getErrorPage(config, 404);
-            if (error_response.empty()) {
-                error_response = getDefaultErrorPage(404);
-            }
-            std::ostringstream oss;
-            oss << error_response.size();
-            std::string response = "HTTP/1.1 404 Not Found\r\n";
-            response += "Content-Type: text/html\r\n";
-            response += "Content-Length: " + oss.str() + "\r\n";
-            response += "\r\n";
-            response += error_response;
-            send(client_fd, response.c_str(), response.size(), 0);
-            close(client_fd);
-            return;
-        }
-
-        const RouteConfig &route = *best_match_route;
-        std::cout << "Matched route: " << route.url << std::endl;
-
-        if (std::find(route.methods.begin(), route.methods.end(), method) == route.methods.end()) {
-            std::cerr << "Method not allowed: " << method << std::endl;
-
-            std::ostringstream allow_methods;
-            for (size_t i = 0; i < route.methods.size(); ++i) {
-                allow_methods << route.methods[i] << ", ";
-            }
-
-            std::string error_response = getErrorPage(config, 405);
-            if (error_response.empty()) {
-                error_response = getDefaultErrorPage(405);
-            }
-            std::ostringstream oss;
-            oss << error_response.size();
-            std::string response = "HTTP/1.1 405 Method Not Allowed\r\n";
-            response += "Content-Type: text/html\r\n";
-            response += "Content-Length: " + oss.str() + "\r\n";
-            response += "Allow: " + allow_methods.str() + "\r\n";
-            response += "\r\n";
-
-            if (method != "HEAD") {
-                response += error_response;
-            }
-
-            send(client_fd, response.c_str(), response.size(), 0);
-            close(client_fd);
-            return;
-        }
-
-        size_t content_length_val = 0;
-        if (!content_length.empty()) {
-            std::stringstream content_length_stream(content_length);
-            content_length_stream >> content_length_val;
-        }
-
-        if ((method == "POST" || method == "PUT") && transfer_encoding != "chunked" && route.max_body > 0 && content_length_val > route.max_body) {
-            std::cerr << "Request body too large: " << content_length_val << " bytes" << std::endl;
-            std::string error_response = "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n";
-            send(client_fd, error_response.c_str(), error_response.size(), 0);
-            close(client_fd);
-            return;
-        }
-
-        size_t total_body_size = 0;
-        if (transfer_encoding == "chunked") {
-            size_t body_start = headers_end + 4;
-            while (true) {
-                size_t chunk_size_end = request.find("\r\n", body_start);
-                if (chunk_size_end == std::string::npos) {
-                    valread = read(client_fd, buffer, BUFFER_SIZE - 1);
-                    if (valread <= 0) {
-                        throw std::runtime_error("Error or client closed connection while reading chunk size");
-                    }
-                    buffer[valread] = '\0';
-                    request += buffer;
-                    continue;
-                }
-
-                std::string chunk_size_str = request.substr(body_start, chunk_size_end - body_start);
-                size_t chunk_size;
-                std::istringstream(chunk_size_str) >> std::hex >> chunk_size;
-
-                if (chunk_size == 0) {
-                    break;
-                }
-
-                total_body_size += chunk_size;
-
-                if (route.max_body > 0 && total_body_size > route.max_body) {
-                    throw std::runtime_error("Request body too large: " + intToString(total_body_size) + " bytes");
-                }
-
-                body_start = chunk_size_end + 2;
-                size_t chunk_end = body_start + chunk_size;
-                while (request.size() < chunk_end) {
-                    valread = read(client_fd, buffer, BUFFER_SIZE - 1);
-                    if (valread <= 0) {
-                        throw std::runtime_error("Error or client closed connection while reading chunk body");
-                    }
-                    buffer[valread] = '\0';
-                    request += buffer;
-                }
-
-                body += request.substr(body_start, chunk_size);
-                body_start = chunk_end + 2;
-            }
-        } else {
-            size_t body_start = headers_end + 4;
-            if (content_length_val > 0) {
-                size_t current_body_size = request.size() - body_start;
-                while (current_body_size < content_length_val) {
-                    valread = read(client_fd, buffer, BUFFER_SIZE);
-                    if (valread > 0) {
-                        request.append(buffer, valread);
-                        current_body_size += valread;
-                    } else {
-                        break;
-                    }
-                }
-                body = request.substr(body_start, content_length_val);
-
-                if (route.max_body > 0 && current_body_size > route.max_body) {
-                    throw std::runtime_error("Request body too large: " + intToString(current_body_size) + " bytes");
-                }
-            }
-        }
-
-        std::string actual_content_length = intToString(body.size());
-
-        if (!route.cgi_path.empty() && (url == route.url || (url.size() >= 4 && url.substr(url.size() - 4) == ".bla"))) {
-            handleCGI(client_fd, route, body, method, query_string, actual_content_length, content_type, url);
-            return;
-        }
-
-        if (!route.upload_dir.empty()) {
-            handleFileUpload(client_fd, route, request);
-            return;
-        }
-
-        std::string file_path;
-        if (!route.alias.empty()) {
-            file_path = route.alias;
-            if (!file_path.empty() && *file_path.rbegin() != '/') {
-                file_path += "/";
-            }
-            std::string remaining_url = url.substr(route.url.size());
-            if (!remaining_url.empty() && *remaining_url.begin() == '/') {
-                remaining_url = remaining_url.substr(1);
-            }
-            file_path += remaining_url;
-        } else {
-            file_path = route.root;
-            if (!file_path.empty() && *file_path.rbegin() != '/' && !url.empty() && *url.begin() != '/') {
-                file_path += "/";
-            }
-            file_path += url;
-        }
-
-        struct stat file_stat;
-        if (stat(file_path.c_str(), &file_stat) < 0) {
-            std::string error_response = getErrorPage(config, 404);
-            if (error_response.empty()) {
-                error_response = getDefaultErrorPage(404);
-            }
-            std::ostringstream oss;
-            oss << error_response.size();
-            std::string response = "HTTP/1.1 404 Not Found\r\n";
-            response += "Content-Type: text/html\r\n";
-            response += "Content-Length: " + oss.str() + "\r\n";
-            response += "\r\n";
-            response += error_response;
-            send(client_fd, response.c_str(), response.size(), 0);
-            close(client_fd);
-            return;
-        }
-
-        if (S_ISDIR(file_stat.st_mode)) {
-            if (!file_path.empty() && *file_path.rbegin() != '/') {
-                file_path += "/";
-            }
-            file_path += (route.index.empty() ? "index.html" : route.index);
-            if (stat(file_path.c_str(), &file_stat) < 0) {
-                if (route.autoindex) {
-                    std::string directory_listing = generateDirectoryListing(file_path.substr(0, file_path.find_last_of('/')), url);
-                    std::ostringstream oss;
-                    oss << directory_listing.size();
-                    std::string response = "HTTP/1.1 200 OK\r\n";
-                    response += "Content-Type: text/html\r\n";
-                    response += "Content-Length: " + oss.str() + "\r\n";
-                    response += "\r\n";
-                    response += directory_listing;
-                    send(client_fd, response.c_str(), response.size(), 0);
-                    close(client_fd);
-                    return;
-                } else {
-                    std::string error_response = getErrorPage(config, 404);
-                    if (error_response.empty()) {
-                        error_response = getDefaultErrorPage(404);
-                    }
-                    std::ostringstream oss;
-                    oss << error_response.size();
-                    std::string response = "HTTP/1.1 404 Not Found\r\n";
-                    response += "Content-Type: text/html\r\n";
-                    response += "Content-Length: " + oss.str() + "\r\n";
-                    response += "\r\n";
-                    response += error_response;
-                    send(client_fd, response.c_str(), response.size(), 0);
-                    close(client_fd);
-                    return;
-                }
-            }
-        }
-
-        std::ifstream file(file_path.c_str());
-        if (!file.is_open()) {
-            std::string error_response = getErrorPage(config, 403);
-            if (error_response.empty()) {
-                error_response = getDefaultErrorPage(403);
-            }
-            std::ostringstream oss;
-            oss << error_response.size();
-            std::string response = "HTTP/1.1 403 Forbidden\r\n";
-            response += "Content-Type: text/html\r\n";
-            response += "Content-Length: " + oss.str() + "\r\n";
-            response += "\r\n";
-            response += error_response;
-            send(client_fd, response.c_str(), response.size(), 0);
-            close(client_fd);
-            return;
-        }
-
-        std::stringstream file_content;
-        file_content << file.rdbuf();
-        std::string response_body = file_content.str();
-        file.close();
-
         std::ostringstream oss;
-        oss << response_body.size();
-        std::string response = "HTTP/1.1 200 OK\r\n";
-        response += "Content-Type: " + getMimeType(file_path) + "\r\n";
+        oss << error_response.size();
+        std::string response = "HTTP/1.1 404 Not Found\r\n";
+        response += "Content-Type: text/html\r\n";
         response += "Content-Length: " + oss.str() + "\r\n";
         response += "\r\n";
-        response += response_body;
+        response += error_response;
+        send(client_fd, response.c_str(), response.size(), 0);
+        close(client_fd);
+        requests.erase(client_fd);
+        return;
+    }
+
+    const RouteConfig &route = *best_match_route;
+    std::cout << "Matched route: " << route.url << std::endl;
+
+    if (std::find(route.methods.begin(), route.methods.end(), method) == route.methods.end()) {
+        std::cerr << "Method not allowed: " << method << std::endl;
+
+        std::ostringstream allow_methods;
+        for (size_t i = 0; i < route.methods.size(); ++i) {
+            allow_methods << route.methods[i] << ", ";
+        }
+
+        std::string error_response = getErrorPage(config, 405);
+        if (error_response.empty()) {
+            error_response = getDefaultErrorPage(405);
+        }
+        std::ostringstream oss;
+        oss << error_response.size();
+        std::string response = "HTTP/1.1 405 Method Not Allowed\r\n";
+        response += "Content-Type: text/html\r\n";
+        response += "Content-Length: " + oss.str() + "\r\n";
+        response += "Allow: " + allow_methods.str() + "\r\n";
+        response += "\r\n";
+
+        if (method != "HEAD") {
+            response += error_response;
+        }
 
         send(client_fd, response.c_str(), response.size(), 0);
         close(client_fd);
-    } catch (const std::exception &e) {
-        std::cerr << "Exception: " << e.what() << std::endl;
-        close(client_fd);
+        requests.erase(client_fd);
+        return;
     }
+
+    size_t content_length_val = 0;
+    if (!content_length.empty()) {
+        std::stringstream content_length_stream(content_length);
+        content_length_stream >> content_length_val;
+    }
+
+    if ((method == "POST" || method == "PUT") && transfer_encoding != "chunked" && route.max_body > 0 && content_length_val > route.max_body) {
+        std::cerr << "Request body too large: " << content_length_val << " bytes" << std::endl;
+        std::string error_response = "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n";
+        send(client_fd, error_response.c_str(), error_response.size(), 0);
+        close(client_fd);
+        requests.erase(client_fd);
+        return;
+    }
+
+    size_t total_body_size = 0;
+    if (transfer_encoding == "chunked") {
+        size_t body_start = headers_end + 4;
+        while (true) {
+            size_t chunk_size_end = request.find("\r\n", body_start);
+            if (chunk_size_end == std::string::npos) {
+                return; // read more data later
+            }
+
+            std::string chunk_size_str = request.substr(body_start, chunk_size_end - body_start);
+            size_t chunk_size;
+            std::istringstream(chunk_size_str) >> std::hex >> chunk_size;
+
+            if (chunk_size == 0) {
+                break;
+            }
+
+            total_body_size += chunk_size;
+
+            if (route.max_body > 0 && total_body_size > route.max_body) {
+                throw std::runtime_error("Request body too large: " + intToString(total_body_size) + " bytes");
+            }
+
+            body_start = chunk_size_end + 2;
+            size_t chunk_end = body_start + chunk_size;
+            while (request.size() < chunk_end) {
+                return; // read more data later
+            }
+
+            body += request.substr(body_start, chunk_size);
+            body_start = chunk_end + 2;
+        }
+    } else {
+        size_t body_start = headers_end + 4;
+        if (content_length_val > 0) {
+            size_t current_body_size = request.size() - body_start;
+            while (current_body_size < content_length_val) {
+                return; // read more data later
+            }
+            body = request.substr(body_start, content_length_val);
+
+            if (route.max_body > 0 && current_body_size > route.max_body) {
+                throw std::runtime_error("Request body too large: " + intToString(current_body_size) + " bytes");
+            }
+        }
+    }
+
+    std::string actual_content_length = intToString(body.size());
+
+    if (!route.cgi_path.empty() && (url == route.url || (url.size() >= 4 && url.substr(url.size() - 4) == ".bla"))) {
+        handleCGI(client_fd, route, body, method, query_string, actual_content_length, content_type, url);
+        return;
+    }
+
+    if (!route.upload_dir.empty()) {
+        handleFileUpload(client_fd, route, request);
+        return;
+    }
+
+    std::string file_path;
+    if (!route.alias.empty()) {
+        file_path = route.alias;
+        if (!file_path.empty() && *file_path.rbegin() != '/') {
+            file_path += "/";
+        }
+        std::string remaining_url = url.substr(route.url.size());
+        if (!remaining_url.empty() && *remaining_url.begin() == '/') {
+            remaining_url = remaining_url.substr(1);
+        }
+        file_path += remaining_url;
+    } else {
+        file_path = route.root;
+        if (!file_path.empty() && *file_path.rbegin() != '/' && !url.empty() && *url.begin() != '/') {
+            file_path += "/";
+        }
+        file_path += url;
+    }
+
+    struct stat file_stat;
+    if (stat(file_path.c_str(), &file_stat) < 0) {
+        std::string error_response = getErrorPage(config, 404);
+        if (error_response.empty()) {
+            error_response = getDefaultErrorPage(404);
+        }
+        std::ostringstream oss;
+        oss << error_response.size();
+        std::string response = "HTTP/1.1 404 Not Found\r\n";
+        response += "Content-Type: text/html\r\n";
+        response += "Content-Length: " + oss.str() + "\r\n";
+        response += "\r\n";
+        response += error_response;
+        send(client_fd, response.c_str(), response.size(), 0);
+        close(client_fd);
+        requests.erase(client_fd);
+        return;
+    }
+
+    if (S_ISDIR(file_stat.st_mode)) {
+        if (!file_path.empty() && *file_path.rbegin() != '/') {
+            file_path += "/";
+        }
+        file_path += (route.index.empty() ? "index.html" : route.index);
+        if (stat(file_path.c_str(), &file_stat) < 0) {
+            if (route.autoindex) {
+                std::string directory_listing = generateDirectoryListing(file_path.substr(0, file_path.find_last_of('/')), url);
+                std::ostringstream oss;
+                oss << directory_listing.size();
+                std::string response = "HTTP/1.1 200 OK\r\n";
+                response += "Content-Type: text/html\r\n";
+                response += "Content-Length: " + oss.str() + "\r\n";
+                response += "\r\n";
+                response += directory_listing;
+                send(client_fd, response.c_str(), response.size(), 0);
+                requests.erase(client_fd);
+                close(client_fd);
+                return;
+            } else {
+                std::string error_response = getErrorPage(config, 404);
+                if (error_response.empty()) {
+                    error_response = getDefaultErrorPage(404);
+                }
+                std::ostringstream oss;
+                oss << error_response.size();
+                std::string response = "HTTP/1.1 404 Not Found\r\n";
+                response += "Content-Type: text/html\r\n";
+                response += "Content-Length: " + oss.str() + "\r\n";
+                response += "\r\n";
+                response += error_response;
+                send(client_fd, response.c_str(), response.size(), 0);
+                requests.erase(client_fd);
+                close(client_fd);
+                return;
+            }
+        }
+    }
+
+    std::ifstream file(file_path.c_str());
+    if (!file.is_open()) {
+        std::string error_response = getErrorPage(config, 403);
+        if (error_response.empty()) {
+            error_response = getDefaultErrorPage(403);
+        }
+        std::ostringstream oss;
+        oss << error_response.size();
+        std::string response = "HTTP/1.1 403 Forbidden\r\n";
+        response += "Content-Type: text/html\r\n";
+        response += "Content-Length: " + oss.str() + "\r\n";
+        response += "\r\n";
+        response += error_response;
+        send(client_fd, response.c_str(), response.size(), 0);
+        requests.erase(client_fd);
+        close(client_fd);
+        return;
+    }
+
+    std::stringstream file_content;
+    file_content << file.rdbuf();
+    std::string response_body = file_content.str();
+    file.close();
+
+    std::ostringstream oss;
+    oss << response_body.size();
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: " + getMimeType(file_path) + "\r\n";
+    response += "Content-Length: " + oss.str() + "\r\n";
+    response += "\r\n";
+    response += response_body;
+
+    send(client_fd, response.c_str(), response.size(), 0);
+    requests.erase(client_fd);
+    close(client_fd);
 }
 
 void WebServer::handleCGI(int client_fd, const RouteConfig &route, const std::string &request_body, const std::string &method, const std::string &query_string, const std::string &content_length, const std::string &content_type, const std::string &url) {
-       int cgi_output[2];
+    int cgi_output[2];
     int cgi_input[2];
 
     if (pipe(cgi_output) < 0 || pipe(cgi_input) < 0) {
@@ -573,7 +573,7 @@ void WebServer::handleCGI(int client_fd, const RouteConfig &route, const std::st
         env_vars.push_back("REMOTE_ADDR=");
         env_vars.push_back("PATH_INFO=" + path_info);
         env_vars.push_back("PATH_TRANSLATED=" + path_translated);
-     //   env_vars.push_back("SCRIPT_NAME=" + url);
+        //   env_vars.push_back("SCRIPT_NAME=" + url);
         env_vars.push_back("PATH=/usr/bin:/bin:/usr/local/bin");
         env_vars.push_back("HTTP_X_SECRET_HEADER_FOR_TEST=1");
         env_vars.push_back("REDIRECT_STATUS=200");
@@ -600,13 +600,8 @@ void WebServer::handleCGI(int client_fd, const RouteConfig &route, const std::st
             ssize_t to_write = std::min(static_cast<ssize_t>(1001), static_cast<ssize_t>(request_body.size() - total_written));
             ssize_t written = write(cgi_input[1], request_body.c_str() + total_written, to_write);
             if (written < 0) {
-                if (errno == EPIPE) {
-                    std::cerr << "Broken pipe: CGI script terminated early" << std::endl;
-                    break;
-                } else {
-                    perror("write to CGI input pipe");
-                    break;
-                }
+                std::cerr << "Broken pipe: CGI script terminated early" << std::endl;
+                break;
             }
             total_written += written;
 
