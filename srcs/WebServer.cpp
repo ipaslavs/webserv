@@ -411,11 +411,15 @@ void WebServer::handleClient(int client_fd) {
 
     if (!route.cgi_path.empty() && (url == route.url || (url.size() >= 4 && url.substr(url.size() - 4) == ".bla"))) {
         handleCGI(client_fd, route, body, method, query_string, actual_content_length, content_type, url);
+        close(client_fd);
+        requests.erase(client_fd);
         return;
     }
 
     if (!route.upload_dir.empty()) {
         handleFileUpload(client_fd, route, request);
+        close(client_fd);
+        requests.erase(client_fd);
         return;
     }
 
