@@ -1,3 +1,4 @@
+// ServerConfig.cpp
 #include "ServerConfig.hpp"
 #include <fstream>
 #include <sstream>
@@ -22,6 +23,15 @@ std::vector<ServerConfig> parseConfigFile(const std::string &filename) {
 
     ServerConfig config;
     RouteConfig route;
+    route.url = ""; // Initialize to empty string
+    route.methods = std::vector<std::string>();
+    route.root = "";
+    route.index = "index.html";
+    route.autoindex = false; // Set default to 'off'
+    route.alias = "";
+    route.upload_dir = "";
+    route.cgi_path = "";
+    route.max_body = 0;
     bool in_server_block = false;
     bool in_error_pages_block = false;
     bool in_routes_block = false;
@@ -113,6 +123,10 @@ std::vector<ServerConfig> parseConfigFile(const std::string &filename) {
             } else if (line.find("alias:") != std::string::npos) {
                 route.alias = trim(line.substr(line.find(":") + 1));
                 std::cout << "Parsed route alias: " << route.alias << std::endl;
+            } else if (line.find("max_body:") != std::string::npos) {
+                std::string max_body_str = trim(line.substr(line.find(":") + 1));
+                route.max_body = std::atoi(max_body_str.c_str());
+                std::cout << "Parsed route max_body: " << route.max_body << std::endl;
             }
         }
     }
@@ -136,7 +150,7 @@ std::vector<ServerConfig> parseConfigFile(const std::string &filename) {
                     std::cout << ", ";
                 }
             }
-            std::cout << "], Root = '" << route.root << "', Index = '" << route.index << "', AutoIndex = '" << (route.autoindex ? "on" : "off") << "', Alias = '" << route.alias << "'" << std::endl;
+            std::cout << "], Root = '" << route.root << "', Index = '" << route.index << "', AutoIndex = '" << (route.autoindex ? "on" : "off") << "', Alias = '" << route.alias << "', Max Body = '" << route.max_body << "'" << std::endl;
         }
     }
 

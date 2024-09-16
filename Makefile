@@ -6,8 +6,9 @@ CXXFLAGS = -Wall -Wextra -Werror -std=c++98 -Iincludes
 SRCDIR = srcs
 INCDIR = includes
 
-# Source files
-SRCS = $(SRCDIR)/*.cpp
+# Source files (without directory prefix)
+SRCFILES = WebServer.cpp ServerConfig.cpp main.cpp
+SRCS = $(addprefix $(SRCDIR)/, $(SRCFILES))
 
 # Executable name
 NAME = webserv

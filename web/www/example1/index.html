@@ -2,11 +2,60 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Welcome to Example 1</title>
+    <title>Welcome to Example Website</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>Welcome to Example 1</h1>
-    <p>This is the homepage for Example 1.</p>
+    <h1>Welcome to Example Website</h1>
+    <p>This is a test website to demonstrate the features of the web server.</p>
+    <img src="images/test_image.jpg" alt="Test Image">
+    <p>
+        <a href="/form_submit">Form Submission</a> |
+        <a href="/put_test/upload_test.txt">Upload via PUT</a> |
+        <a href="/upload.html">Upload via POST</a> |
+        <a href="/cgi-bin/script">Run CGI Script</a> |
+        <a href="/directory">Test Directory Listing</a>
+    </p>
+    <h2>Upload a File</h2>
+    <form action="/upload_handler" method="POST" enctype="multipart/form-data">
+        <label for="fileUpload">Choose a file to upload:</label><br>
+        <input type="file" id="fileUpload" name="uploaded_file"><br><br>
+        <input type="submit" value="Upload">
+    </form>
+<h2>Test Max Body Size</h2>
+    <form id="maxBodyForm" action="/post_body" method="POST">
+        <label for="textInput">Enter text (over 100 characters to test):</label><br>
+        <textarea id="textInput" name="textInput" rows="5" cols="50"></textarea><br><br>
+        <input type="submit" value="Submit">
+    </form>
+
+    <!-- Optional: Use JavaScript to automatically submit a large payload -->
+    <script>
+        function sendLargePayload() {
+            const largeText = 'A'.repeat(150); // 150 characters, exceeds 100-byte limit
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/post_body';
+
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'textInput';
+            input.value = largeText;
+            form.appendChild(input);
+
+            document.body.appendChild(form);
+            form.submit();
+        }
+
+        // Add an event listener to the form to test max body size
+        document.getElementById('maxBodyForm').addEventListener('submit', function(event) {
+            const textInput = document.getElementById('textInput').value;
+            if (textInput.length <= 100) {
+                alert('Please enter more than 100 characters to test the max body size limit.');
+                event.preventDefault();
+            }
+        });
+    </script>
+    <script src="script.js"></script>
 </body>
 </html>
-

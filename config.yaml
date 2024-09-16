@@ -4,16 +4,19 @@ servers:
     error_pages:
       404: ./web/errors/error404.html
       500: ./web/errors/error500.html
+      413: ./web/errors/error413.html
     client_max_body_size: 1048576
     routes:
       - url: /
         methods: [GET]
         root: ./web/www/example1
       - url: /form_submit
-        methods: [POST]
+        methods: [GET, POST]
         root: ./web/www/example1/form_submit
+        index: index.html
       - url: /put_test
-        methods: [PUT]
+        methods: [PUT, GET]
+        root: ./web/uploads/example1/put_test
         upload_dir: ./web/uploads/example1/put_test
       - url: /cgi-bin/script
         methods: [POST, GET]
@@ -29,6 +32,9 @@ servers:
       - url: .bla
         methods: [POST, GET]
         cgi_path: ./cgi_tester
+      - url: /upload_handler
+        methods: [POST, DELETE]
+        upload_dir: ./web/uploads/example1/upload_test
   - port: 8081
     server_name: example.com
     error_pages:

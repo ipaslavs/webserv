@@ -1,30 +1,79 @@
-#ifndef WEB_SERVER_HPP
-#define WEB_SERVER_HPP
+#ifndef WEBSERVER_HPP
+#define WEBSERVER_HPP
 
 #include "ServerConfig.hpp"
 #include <vector>
-#include <string>
 #include <map>
+#include <string>
 #include <poll.h>
-
-#define MAX_CLIENTS 1024
 
 class WebServer {
 public:
     WebServer(const std::vector<ServerConfig> &configs);
     void run();
-
 private:
-    void bindSocket(int &server_fd, int port);
-    void handleClient(int client_fd);
-    void handleCGI(int client_fd, const RouteConfig &route, const std::string &request_body, const std::string &method, const std::string &query_string, const std::string &content_length, const std::string &content_type, const std::string &url);
-    void handleFileUpload(int client_fd, const RouteConfig &route, const std::string &request);
-
     std::vector<ServerConfig> configs;
     std::vector<int> server_fds;
-    std::map<int, int> client_server_map;
-    struct pollfd fds[MAX_CLIENTS];
+    struct pollfd fds[1024];
     int nfds;
+    std::map<int, int> client_server_map;
+
+    void bindSocket(int &server_fd, int port);
+    void handleClientRead(int fd);
+    void handleClientWrite(int fd);
+    void processRequest(int client_fd);
+    void setNonBlocking(int socket);
+    static bool is_closed_socket(const struct pollfd &pfd);
+
+    struct ClientConnection {
+        int fd;
+        std::string request;
+        std::string response;
+        size_t response_sent;
+        bool headers_received;
+        bool response_ready;
+        bool closed;
+        size_t content_length;
+        std::string method;
+        std::string url;
+        std::string http_version;
+        std::string content_type;
+        std::string query_string;
+        std::string transfer_encoding;
+        std::string body;
+        const RouteConfig *route;
+        // Additional state for CGI handling
+        pid_t cgi_pid;
+        int cgi_input_fd;
+        int cgi_output_fd;
+        size_t total_cgi_input_written;
+        std::string request_body;
+        std::string cgi_output;
+        // For DELETE method
+        std::string file_path;
+    };
+    std::map<int, ClientConnection> clients;
+
+    // Helper functions
+    static std::string intToString(int value);
+    static std::string getMimeType(const std::string &path);
+    static std::string getErrorPage(const ServerConfig &config, int status_code);
+    static std::string getStatusText(int status_code);
+    static std::string getDefaultErrorPage(int status_code);
+    static std::string generateDirectoryListing(const std::string &path, const std::string &url);
+
+    void handleCGI(int client_fd);
+    void handleCGIWrite(int cgi_input_fd);
+    void handleCGIRead(int cgi_output_fd);
+    void handleFileUpload(int client_fd);
+    void handleDeleteRequest(int client_fd);
+
+    // Additional helper functions
+    void parseRequestHeaders(ClientConnection &client);
+    bool isRequestComplete(ClientConnection &client);
+    ClientConnection* findClientByCGIFD(int fd);
+    void addFdToPoll(int fd, short events);
+    void removeFdFromPoll(int fd);
 };
 
-#endif // WEB_SERVER_HPP
+#endif // WEBSERVER_HPP
