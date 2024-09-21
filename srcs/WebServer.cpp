@@ -124,8 +124,9 @@ void WebServer::run() {
             perror("poll");
             exit(EXIT_FAILURE);
         }
-
-        for (int i = 0; i < nfds; ++i) {
+        
+        int bufnfds = nfds;
+        for (int i = 0; i < bufnfds; ++i) {
             if (fds[i].revents & POLLIN) {
                 if (std::find(server_fds.begin(), server_fds.end(), fds[i].fd) != server_fds.end()) {
                     // Accept new connections
