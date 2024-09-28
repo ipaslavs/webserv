@@ -19,7 +19,7 @@
 #include <poll.h>
 #include <cstdlib>
 
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 2048
 #define MAX_CLIENTS 1024
 
 WebServer::WebServer(const std::vector<ServerConfig> &configs)
@@ -38,11 +38,11 @@ WebServer::WebServer(const std::vector<ServerConfig> &configs)
 void WebServer::setNonBlocking(int socket) {
     int flags = fcntl(socket, F_GETFL, 0);
     if (flags == -1) {
-        perror("fcntl F_GETFL");
+        std::cerr << "fcntl F_GETFL error" << std::endl;
         exit(EXIT_FAILURE);
     }
     if (fcntl(socket, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("fcntl F_SETFL");
+        std::cerr << "fcntl F_SETFL error" << std::endl;
         exit(EXIT_FAILURE);
     }
 }
@@ -52,12 +52,12 @@ void WebServer::bindSocket(int &server_fd, int port) {
     struct sockaddr_in address;
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed");
+        std::cerr << "Socket creation error" << std::endl;
         exit(EXIT_FAILURE);
     }
 
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt))) {
-        perror("setsockopt");
+        std::cerr << "Setsockopt error" << std::endl;
         close(server_fd);
         exit(EXIT_FAILURE);
     }
@@ -67,13 +67,13 @@ void WebServer::bindSocket(int &server_fd, int port) {
     address.sin_port = htons(port);
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("bind failed");
+        std::cerr << "Bind failed" << std::endl;
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
     if (listen(server_fd, 128) < 0) {
-        perror("listen");
+        std::cerr << "Listen error" << std::endl;
         close(server_fd);
         exit(EXIT_FAILURE);
     }
@@ -101,7 +101,10 @@ void WebServer::addFdToPoll(int fd, short events) {
 void WebServer::removeFdFromPoll(int fd) {
     for (int i = 0; i < nfds; ++i) {
         if (fds[i].fd == fd) {
-            fds[i].fd = -1;
+            std::cout << "Removing fd " << fd << " from poll array" << std::endl;
+            // Replace the current fd with the last fd in the array
+            fds[i] = fds[nfds - 1];
+            nfds--;
             break;
         }
     }
@@ -121,122 +124,114 @@ void WebServer::run() {
         int poll_count = poll(fds, nfds, -1);
 
         if (poll_count < 0) {
-            perror("poll");
+            std::cerr << "Poll error" << std::endl;
             exit(EXIT_FAILURE);
         }
         
-        int bufnfds = nfds;
-        for (int i = 0; i < bufnfds; ++i) {
+        std::cout << "Poll returned with " << poll_count << " events" << std::endl;
+
+        // Process fds in reverse order
+        for (int i = nfds - 1; i >= 0; --i) {
+            if (fds[i].revents == 0)
+                continue;
+
+            int fd = fds[i].fd;
+
             if (fds[i].revents & POLLIN) {
-                if (std::find(server_fds.begin(), server_fds.end(), fds[i].fd) != server_fds.end()) {
-                    // Accept new connections
-                    struct sockaddr_in address;
-                    socklen_t addrlen = sizeof(address);
-                    int new_socket;
-
-                    while ((new_socket = accept(fds[i].fd, (struct sockaddr *)&address, &addrlen)) >= 0) {
-                        std::cout << "New connection on socket " << new_socket << std::endl;
-
-                        setNonBlocking(new_socket);
-
-                        addFdToPoll(new_socket, POLLIN | POLLOUT | POLLERR | POLLHUP);
-
-                        ClientConnection client;
-                        client.fd = new_socket;
-                        client.request = "";
-                        client.response = "";
-                        client.response_sent = 0;
-                        client.headers_received = false;
-                        client.response_ready = false;
-                        client.closed = false;
-                        client.content_length = 0;
-                        client.method = "";
-                        client.url = "";
-                        client.http_version = "";
-                        client.content_type = "";
-                        client.query_string = "";
-                        client.transfer_encoding = "";
-                        client.body = "";
-                        client.route = NULL;
-                        client.cgi_pid = -1;
-                        client.cgi_input_fd = -1;
-                        client.cgi_output_fd = -1;
-                        client.total_cgi_input_written = 0;
-                        client.request_body = "";
-                        client.cgi_output = "";
-                        clients[new_socket] = client;
-
-                        client_server_map[new_socket] = i;
-                    }
+                std::cout << "POLLIN event for fd: " << fd << std::endl;
+                if (std::find(server_fds.begin(), server_fds.end(), fd) != server_fds.end()) {
+                    handleNewConnection(fd);
                 } else {
-                    // Read data from client or CGI output
-                    if (clients.find(fds[i].fd) != clients.end()) {
-                        handleClientRead(fds[i].fd);
+                    if (clients.find(fd) != clients.end()) {
+                        handleClientRead(fd);
                     } else {
-                        // Check if it's a CGI output fd
-                        handleCGIRead(fds[i].fd);
+                        handleCGIRead(fd);
                     }
                 }
             }
 
             if (fds[i].revents & POLLOUT) {
-                // Write data to client or CGI input
-                if (clients.find(fds[i].fd) != clients.end()) {
-                    handleClientWrite(fds[i].fd);
+                std::cout << "POLLOUT event for fd: " << fd << std::endl;
+                if (clients.find(fd) != clients.end()) {
+                    ClientConnection &client = clients[fd];
+                    if (client.response_ready) {
+                        handleClientWrite(fd);
+                    } else {
+                        // Remove POLLOUT event if response is not ready
+                        fds[i].events &= ~POLLOUT;
+                        std::cout << "Removed POLLOUT event for client " << fd << " as response is not ready" << std::endl;
+                    }
                 } else {
-                    // Check if it's a CGI input fd
-                    handleCGIWrite(fds[i].fd);
+                    handleCGIWrite(fd);
                 }
             }
-            
+
             if (fds[i].revents & (POLLHUP | POLLERR)) {
-                std::cout << "POLLHUP or POLLERR on socket " << fds[i].fd << std::endl;
-
-                // Check if fd is a client socket
-                if (clients.find(fds[i].fd) != clients.end()) {
-                    // It's a client socket
-                    close(fds[i].fd);
-                    clients.erase(fds[i].fd);
-                    fds[i].fd = -1;
+                std::cout << "POLLHUP or POLLERR event for fd: " << fd << std::endl;
+                if (clients.find(fd) != clients.end()) {
+                    handleDisconnection(fd);
                 } else {
-                    // Check if fd is associated with a CGI process
-                    ClientConnection *client = findClientByCGIFD(fds[i].fd);
+                    // This might be a CGI fd
+                    ClientConnection *client = findClientByCGIFD(fd);
                     if (client) {
-                        if (fds[i].fd == client->cgi_output_fd) {
-                            // Read any remaining data from CGI output
-                            handleCGIRead(fds[i].fd);
-                            // Close CGI output fd
-                            close(client->cgi_output_fd);
-                            client->cgi_output_fd = -1;
-                            removeFdFromPoll(fds[i].fd);
-                            fds[i].fd = -1;
-
-                            // Wait for CGI process to finish
-                            waitpid(client->cgi_pid, NULL, 0);
-
-                            // Construct response
-                            std::string status_line = "HTTP/1.1 200 OK\r\n";
-                            client->response = status_line + client->cgi_output;
-                            client->response_ready = true;
-                            std::cout << "Response ready for client_fd: " << client->fd << std::endl;
-                        } else if (fds[i].fd == client->cgi_input_fd) {
-                            // Close CGI input fd
+                        if (fd == client->cgi_output_fd) {
+                            handleCGIRead(fd);
+                        } else if (fd == client->cgi_input_fd) {
                             close(client->cgi_input_fd);
                             client->cgi_input_fd = -1;
-                            removeFdFromPoll(fds[i].fd);
-                            fds[i].fd = -1;
+                            removeFdFromPoll(fd);
                         }
                     } else {
-                        // Unknown fd, just close it
-                        close(fds[i].fd);
-                        fds[i].fd = -1;
+                        close(fd);
+                        removeFdFromPoll(fd);
                     }
                 }
             }
         }
+    }
+}
 
-        // Clean up closed fds
-        nfds = std::remove_if(fds, fds + nfds, is_closed_socket) - fds;
+void WebServer::handleNewConnection(int server_fd) {
+    struct sockaddr_in address;
+    socklen_t addrlen = sizeof(address);
+    int new_socket;
+
+    while ((new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen)) >= 0) {
+        std::cout << "New connection on socket " << new_socket << std::endl;
+
+        setNonBlocking(new_socket);
+
+        addFdToPoll(new_socket, POLLIN | POLLOUT | POLLERR | POLLHUP);
+
+        ClientConnection client;
+        client.fd = new_socket;
+        client.request = "";
+        client.response = "";
+        client.response_sent = 0;
+        client.headers_received = false;
+        client.response_ready = false;
+        client.closed = false;
+        client.content_length = 0;
+        client.method = "";
+        client.url = "";
+        client.http_version = "";
+        client.content_type = "";
+        client.query_string = "";
+        client.transfer_encoding = "";
+        client.body = "";
+        client.route = NULL;
+        client.cgi_pid = -1;
+        client.cgi_input_fd = -1;
+        client.cgi_output_fd = -1;
+        client.total_cgi_input_written = 0;
+        client.request_body = "";
+        client.cgi_output = "";
+        client.chunked_encoding = false;
+        client.current_chunk_size = 0;
+        client.chunk_size_received = false;
+        clients[new_socket] = client;
+
+        client_server_map[new_socket] = std::find(server_fds.begin(), server_fds.end(), server_fd) - server_fds.begin();
     }
 }
 
@@ -244,34 +239,64 @@ void WebServer::handleClientRead(int client_fd) {
     char buffer[BUFFER_SIZE];
     ssize_t valread = recv(client_fd, buffer, sizeof(buffer), 0);
 
+    std::cout << "Handling client read for fd: " << client_fd << std::endl;
+
     if (valread > 0) {
+        std::cout << "Read " << valread << " bytes from client" << std::endl;
         ClientConnection &client = clients[client_fd];
         client.request.append(buffer, valread);
 
-        if (!client.headers_received && client.request.find("\r\n\r\n") != std::string::npos) {
-            parseRequestHeaders(client);
+        std::cout << "Current request size: " << client.request.size() << " bytes" << std::endl;
+
+        if (!client.headers_received) {
+            size_t header_end = client.request.find("\r\n\r\n");
+            if (header_end != std::string::npos) {
+                parseRequestHeaders(client);
+                client.request = client.request.substr(header_end + 4);
+                
+                if (client.expect_100_continue) {
+                    std::string continue_response = "HTTP/1.1 100 Continue\r\n\r\n";
+                    send(client_fd, continue_response.c_str(), continue_response.length(), 0);
+                    client.expect_100_continue = false;
+                }
+            }
         }
 
-        if (client.headers_received && isRequestComplete(client)) {
-            processRequest(client_fd);
+        if (client.headers_received)
+        {
+            if (client.chunked_encoding)
+            {
+                processChunkedRequest(client);
+            }
+            else if (client.content_length > 0)
+            {
+                client.body += client.request;
+                if (client.body.size() >= client.content_length)
+                {
+                    client.body = client.body.substr(0, client.content_length);
+                    processRequest(client_fd);
+                }
+            }
+            else
+            {
+                processRequest(client_fd);
+            }
         }
     } else if (valread == 0) {
-        // Client disconnected
-        std::cout << "Client disconnected from socket " << client_fd << std::endl;
-        close(client_fd);
-        clients.erase(client_fd);
-        removeFdFromPoll(client_fd);
+        std::cout << "Client disconnected on fd: " << client_fd << std::endl;
+        handleDisconnection(client_fd);
     } else {
-        // Do not check errno; simply wait for the next poll iteration
-        // Optionally, log the error without checking errno
+        std::cerr << "Error reading from client on fd: " << client_fd << std::endl;
     }
 }
 
 void WebServer::handleClientWrite(int client_fd) {
     ClientConnection &client = clients[client_fd];
 
+    std::cout << "Handling client write for fd: " << client_fd << std::endl;
+
     if (!client.response_ready) {
-        // Response not ready yet
+        std::cout << "Response not ready for client " << client_fd << std::endl;
         return;
     }
 
@@ -280,25 +305,20 @@ void WebServer::handleClientWrite(int client_fd) {
         ssize_t sent = send(client_fd, client.response.c_str() + client.response_sent, to_send, 0);
         if (sent > 0) {
             client.response_sent += sent;
+            std::cout << "Sent " << sent << " bytes to client " << client_fd << std::endl;
             if (client.response_sent >= client.response.size()) {
-                // Response fully sent
-                close(client_fd);
-                clients.erase(client_fd);
-                removeFdFromPoll(client_fd);
+                std::cout << "Response fully sent to client " << client_fd << std::endl;
+                handleDisconnection(client_fd);  // Close the connection after sending the response
             }
         } else if (sent == 0) {
-            // Connection closed
-            close(client_fd);
-            clients.erase(client_fd);
-            removeFdFromPoll(client_fd);
+            std::cout << "Connection closed while sending to client " << client_fd << std::endl;
+            handleDisconnection(client_fd);
         } else {
-            // Do not check errno; simply wait for the next POLLOUT event
+            std::cerr << "Error sending data to client " << client_fd << ": " << strerror(errno) << std::endl;
         }
     } else {
-        // No more data to send
-        close(client_fd);
-        clients.erase(client_fd);
-        removeFdFromPoll(client_fd);
+        std::cout << "No data to send to client " << client_fd << std::endl;
+        handleDisconnection(client_fd);  // Close the connection if there's no data to send
     }
 }
 
@@ -314,6 +334,11 @@ void WebServer::parseRequestHeaders(ClientConnection &client) {
     std::istringstream request_line_stream(line);
     request_line_stream >> client.method >> client.url >> client.http_version;
 
+    std::cout << "Parsing request headers:" << std::endl;
+    std::cout << "  Method: " << client.method << std::endl;
+    std::cout << "  URL: " << client.url << std::endl;
+    std::cout << "  HTTP Version: " << client.http_version << std::endl;
+
     // Parse headers
     while (std::getline(request_stream, line) && line != "\r") {
         size_t pos = line.find(": ");
@@ -326,12 +351,23 @@ void WebServer::parseRequestHeaders(ClientConnection &client) {
                 header_value = header_value.substr(0, header_value.size() - 1);
             }
 
+            std::cout << "  Header: " << header_name << " = " << header_value << std::endl;
+
             if (header_name == "Content-Length") {
                 client.content_length = std::atoi(header_value.c_str());
+                std::cout << "    Content-Length set to: " << client.content_length << std::endl;
             } else if (header_name == "Content-Type") {
                 client.content_type = header_value;
+                std::cout << "    Content-Type set to: " << client.content_type << std::endl;
             } else if (header_name == "Transfer-Encoding") {
                 client.transfer_encoding = header_value;
+                if (header_value == "chunked") {
+                    client.chunked_encoding = true;
+                    std::cout << "    Chunked encoding detected" << std::endl;
+                }
+            } else if (header_name == "Expect" && header_value == "100-continue") {
+                client.expect_100_continue = true;
+                std::cout << "    Expect: 100-continue detected" << std::endl;
             }
         }
     }
@@ -341,52 +377,79 @@ void WebServer::parseRequestHeaders(ClientConnection &client) {
     if (pos != std::string::npos) {
         client.query_string = client.url.substr(pos + 1);
         client.url = client.url.substr(0, pos);
+        std::cout << "  Query string: " << client.query_string << std::endl;
     }
 
     client.headers_received = true;
+    std::cout << "Headers parsing complete" << std::endl;
 }
 
 bool WebServer::isRequestComplete(ClientConnection &client) {
     size_t headers_end = client.request.find("\r\n\r\n");
+    if (headers_end == std::string::npos) {
+        std::cout << "Headers not yet complete" << std::endl;
+        return false;
+    }
+    
     size_t body_start = headers_end + 4;
     size_t request_size = client.request.size();
 
-    if (client.transfer_encoding == "chunked") {
-        // Handle chunked transfer encoding
-        size_t pos = body_start;
-        while (true) {
-            size_t chunk_size_end = client.request.find("\r\n", pos);
-            if (chunk_size_end == std::string::npos)
-                return false; // Need more data
+    std::cout << "Checking if request is complete:" << std::endl;
+    std::cout << "  Headers end at: " << headers_end << std::endl;
+    std::cout << "  Body starts at: " << body_start << std::endl;
+    std::cout << "  Total request size: " << request_size << std::endl;
+    std::cout << "  Expected content length: " << client.content_length << std::endl;
 
-            std::string chunk_size_str = client.request.substr(pos, chunk_size_end - pos);
-            size_t chunk_size;
-            std::istringstream(chunk_size_str) >> std::hex >> chunk_size;
-
-            pos = chunk_size_end + 2;
-            size_t chunk_data_end = pos + chunk_size;
-
-            if (chunk_data_end > request_size)
-                return false; // Need more data
-
-            client.body.append(client.request.substr(pos, chunk_size));
-            pos = chunk_data_end + 2; // Skip \r\n after chunk data
-
-            if (chunk_size == 0)
-                break; // Last chunk
-        }
-        return true;
+    if (client.chunked_encoding) {
+        std::cout << "  Chunked encoding detected, will be processed separately" << std::endl;
+        return false;
     } else if (client.content_length > 0) {
         size_t total_size = body_start + client.content_length;
+        std::cout << "  Expected total size: " << total_size << std::endl;
         if (request_size >= total_size) {
             client.body = client.request.substr(body_start, client.content_length);
+            std::cout << "  Request is complete. Body size: " << client.body.size() << " bytes" << std::endl;
             return true;
         } else {
-            return false; // Need more data
+            std::cout << "  Need more data. Current size: " << request_size << ", Expected: " << total_size << std::endl;
+            return false;
         }
     } else {
-        // No body expected
+        std::cout << "  No body expected, request is complete" << std::endl;
         return true;
+    }
+}
+
+void WebServer::processChunkedRequest(ClientConnection &client) {
+    std::string &request = client.request;
+    std::string &body = client.body;
+
+    while (!request.empty()) {
+        if (!client.chunk_size_received) {
+            size_t pos = request.find("\r\n");
+            if (pos == std::string::npos) {
+                return; // Incomplete chunk size
+            }
+            std::string chunk_size_str = request.substr(0, pos);
+            client.current_chunk_size = strtoul(chunk_size_str.c_str(), NULL, 16);
+            client.chunk_size_received = true;
+            request.erase(0, pos + 2);
+        }
+
+        if (client.current_chunk_size == 0) {
+            // End of chunked data
+            client.chunked_encoding = false;
+            processRequest(client.fd);
+            return;
+        }
+
+        if (request.size() < client.current_chunk_size + 2) {
+            return; // Incomplete chunk
+        }
+
+        body.append(request.substr(0, client.current_chunk_size));
+        request.erase(0, client.current_chunk_size + 2); // +2 for \r\n
+        client.chunk_size_received = false;
     }
 }
 
@@ -397,412 +460,451 @@ void WebServer::processRequest(int client_fd) {
     std::string url = client.url;
     std::string http_version = client.http_version;
 
+    std::cout << "Processing request for client fd: " << client_fd << std::endl;
+    std::cout << "  Method: " << method << std::endl;
+    std::cout << "  URL: " << url << std::endl;
+    std::cout << "  HTTP Version: " << http_version << std::endl;
+    std::cout << "  Content-Type: " << client.content_type << std::endl;
+    std::cout << "  Content-Length: " << client.content_length << std::endl;
+
     // Find the best matching route
     const RouteConfig *best_match_route = NULL;
     size_t longest_match_length = 0;
 
+    std::cout << "Searching for matching route..." << std::endl;
+    // First Pass: Prefix-Based Matching
     for (size_t i = 0; i < server_config.routes.size(); ++i) {
         const RouteConfig &route = server_config.routes[i];
+        std::cout << "  Checking route: " << route.url << std::endl;
         if ((route.url == "/" && url.find(route.url) == 0) ||
             (route.url != "/" && (url == route.url || url.find(route.url + "/") == 0))) {
             if (route.url.size() >= longest_match_length) {
                 best_match_route = &route;
                 longest_match_length = route.url.size();
+                std::cout << "    Found matching route: " << route.url << std::endl;
+            }
+        }
+    }
+
+    // Second Pass: Suffix-Based Matching (Extension-Based)
+    for (size_t i = 0; i < server_config.routes.size(); ++i) {
+        const RouteConfig &route = server_config.routes[i];
+        // Treat routes starting with '.' as extension-based routes
+        if (!route.url.empty() && route.url[0] == '.') {
+            size_t ext_length = route.url.size();
+            if (url.size() >= ext_length &&
+                url.compare(url.size() - ext_length, ext_length, route.url) == 0) {
+
+                best_match_route = &route;
+                std::cout << "    Found extension-based matching route: " << route.url << std::endl;
+
             }
         }
     }
 
     if (!best_match_route) {
         std::cerr << "Route not found for URL: " << url << std::endl;
-        std::string response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        client.response = response;
-        client.response_ready = true;
+        sendErrorResponse(client, 404);
         return;
     }
 
+    std::cout << "Best matching route: " << best_match_route->url << std::endl;
     client.route = best_match_route;
     const RouteConfig &route = *best_match_route;
 
     // Check if the method is allowed
+    std::cout << "Checking if method is allowed..." << std::endl;
     if (std::find(route.methods.begin(), route.methods.end(), method) == route.methods.end()) {
         std::string allowed_methods;
-        for (size_t i = 0; i < route.methods.size(); ++i)
-        {
+        for (size_t i = 0; i < route.methods.size(); ++i) {
             allowed_methods += route.methods[i];
-            if (i < route.methods.size() - 1)
-            {
+            if (i < route.methods.size() - 1) {
                 allowed_methods += ", ";
             }
         }
-        std::string error_body = getErrorPage(server_config, 405);
-        if (error_body.empty())
-        {
-            error_body = getDefaultErrorPage(405);
-        }
-        std::ostringstream response_stream;
-        response_stream << "HTTP/1.1 405 Method Not Allowed\r\n";
-        response_stream << "Content-Type: text/html\r\n";
-        response_stream << "Content-Length: " << error_body.size() << "\r\n";
-        response_stream << "Allow: " << allowed_methods << "\r\n";
-        response_stream << "Connection: close\r\n\r\n";
-        response_stream << error_body;
-        client.response = response_stream.str();
-        client.response_ready = true;
+        std::cout << "Method not allowed. Allowed methods: " << allowed_methods << std::endl;
+        sendErrorResponse(client, 405, "Allow: " + allowed_methods);
         return;
     }
 
-     // **Check for Max Body Size Limit**
-    if (client.route->max_body > 0 && client.body.size() > client.route->max_body) {
-        std::cerr << "Request body exceeds max allowed size" << std::endl;
-        std::string error_body = getErrorPage(server_config, 413);
-        if (error_body.empty()) {
-            error_body = getDefaultErrorPage(413);
-        }
-        std::ostringstream response_stream;
-        response_stream << "HTTP/1.1 413 Payload Too Large\r\n";
-        response_stream << "Content-Type: text/html\r\n";
-        response_stream << "Content-Length: " << error_body.size() << "\r\n";
-        response_stream << "Connection: close\r\n\r\n";
-        response_stream << error_body;
-        client.response = response_stream.str();
-        client.response_ready = true;
-        return;
-    }
-
-    // Handle DELETE request
-    if (method == "DELETE") {
-        handleDeleteRequest(client_fd);
-        return;
-    }
-
-    // Handle PUT request
-    if (method == "PUT") {
-        std::string upload_dir = route.upload_dir;
-        if (upload_dir.empty()) {
-            std::cerr << "Upload directory not specified for PUT request" << std::endl;
-            std::string response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            client.response = response;
-            client.response_ready = true;
-            return;
-        }
-
-        // Construct the full path for the uploaded file
-        std::string upload_path = upload_dir + url.substr(route.url.size());
-        std::cerr << "Uploading file to: " << upload_path << std::endl;
-
-        // Create directories if they do not exist
-        size_t last_slash_pos = upload_path.find_last_of('/');
-        if (last_slash_pos != std::string::npos) {
-            std::string dir_path = upload_path.substr(0, last_slash_pos);
-            // Ensure directory path is safe
-            if (dir_path.find("..") != std::string::npos) {
-                std::cerr << "Invalid directory path: " << dir_path << std::endl;
-                std::string response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                client.response = response;
-                client.response_ready = true;
-                return;
-            }
-            mkdir(dir_path.c_str(), 0755);
-        }
-
-        // Open the file for writing
-        std::ofstream outfile(upload_path.c_str(), std::ios::binary);
-        if (!outfile.is_open()) {
-            std::cerr << "Could not open file for writing: " << upload_path << std::endl;
-            std::string response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            client.response = response;
-            client.response_ready = true;
-            return;
-        }
-
-        // Write the request body to the file
-        outfile << client.body;
-        outfile.close();
-
-        // Send response
-        std::string response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        client.response = response;
-        client.response_ready = true;
-        return;
-    }
-
-    // Handle POST request
-    if (method == "POST") {
-        if (client.content_type.find("multipart/form-data") != std::string::npos) {
-            handleFileUpload(client_fd);
-        } else if (!route.cgi_path.empty()) {
-            handleCGI(client_fd);
-        } else {
-            // Handle other POST requests
-            std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            client.response = response;
-            client.response_ready = true;
-        }
-        return;
-    }
-
-    // Handle GET request
+    // Handle different HTTP methods
+    std::cout << "Handling " << method << " request" << std::endl;
     if (method == "GET") {
-        std::string file_path;
+        handleGetRequest(client);
+    } else if (method == "POST") {
+        std::cout << "Received POST request for URL: " << url << std::endl;
+        std::cout << "Content-Type: " << client.content_type << std::endl;
+        std::cout << "Content-Length: " << client.content_length << std::endl;
+        std::cout << "Transfer-Encoding: " << client.transfer_encoding << std::endl;
+
+        if (client.transfer_encoding == "chunked") {
+            client.chunked_encoding = true;
+        }
+        
+        // Check max body size
+        if (route.max_body > 0 && client.body.size() > route.max_body) {
+            std::cout << "Request body exceeds max allowed size" << std::endl;
+            sendErrorResponse(client, 413);
+            return;
+        }
 
         if (!route.cgi_path.empty()) {
+            std::cout << "Handling CGI request" << std::endl;
             handleCGI(client_fd);
-            return;
-        }
-
-        // Construct the file path
-        if (!route.alias.empty()) {
-            // Use alias if specified
-            file_path = route.alias;
-            std::string remaining_url = url.substr(route.url.size());
-            if (!remaining_url.empty() && remaining_url[0] == '/') {
-                remaining_url = remaining_url.substr(1);
-            }
-            if (!file_path.empty() && file_path[file_path.size() - 1] != '/' && !remaining_url.empty()) {
-                file_path += "/";
-            }
-            file_path += remaining_url;
+        } else if (!route.upload_dir.empty()) {
+            std::cout << "Handling file upload to directory: " << route.upload_dir << std::endl;
+            handleFileUpload(client);
         } else {
-            // Use root directory
-            file_path = route.root;
-            std::string remaining_url = url.substr(route.url.size());
-            if (!remaining_url.empty() && remaining_url[0] == '/') {
-                remaining_url = remaining_url.substr(1);
-            }
-            if (!file_path.empty() && file_path[file_path.size() - 1] != '/' && !remaining_url.empty()) {
-                file_path += "/";
-            }
-            file_path += remaining_url;
+            std::cout << "Handling regular POST request" << std::endl;
+            handlePostRequest(client);
         }
+    } else if (method == "DELETE") {
+        handleDeleteRequest(client);
+    } else if (method == "PUT") {
+        handlePutRequest(client);
+    } else {
+        // If the method is not supported
+        std::cout << "Unsupported method: " << method << std::endl;
+        sendErrorResponse(client, 501); //501
+    }
+}
 
-        // Debugging: print the file path
-        std::cerr << "GET request for file: " << file_path << std::endl;
+void WebServer::handleGetRequest(ClientConnection &client) {
+    const RouteConfig &route = *client.route;
 
-        struct stat file_stat;
-        if (stat(file_path.c_str(), &file_stat) == -1) {
-            // perror("stat"); // Do not use perror as it uses errno
-            std::cerr << "stat failed for " << file_path << std::endl;
-            std::string response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            client.response = response;
-            client.response_ready = true;
-            return;
-        }
+    std::cout << "Handling GET request for client fd: " << client.fd << std::endl;
 
-        if (S_ISDIR(file_stat.st_mode)) {
-            // Handle directory
-            std::cerr << "Directory requested. Original file path: " << file_path << std::endl;
-
-            if (!route.index.empty()) {
-                if (!file_path.empty() && file_path[file_path.size() - 1] != '/') {
-                    file_path += "/";
-                }
-                file_path += route.index;
-                std::cerr << "Appended index file. New file path: " << file_path << std::endl;
-
-                // Check if the index file exists
-                if (stat(file_path.c_str(), &file_stat) == -1) {
-                    // perror("stat"); // Do not use perror as it uses errno
-                    std::cerr << "stat failed for index file " << file_path << std::endl;
-                    if (route.autoindex) {
-                        // Generate directory listing
-                        std::string listing = generateDirectoryListing(file_path, url);
-                        // Build and send response
-                        std::ostringstream response_stream;
-                        response_stream << "HTTP/1.1 200 OK\r\n";
-                        response_stream << "Content-Type: text/html\r\n";
-                        response_stream << "Content-Length: " << listing.size() << "\r\n";
-                        response_stream << "\r\n";
-                        response_stream << listing;
-                        client.response = response_stream.str();
-                        client.response_ready = true;
-                        return;
-                    } else {
-                        // Return 404 Not Found
-                        std::string response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        client.response = response;
-                        client.response_ready = true;
-                        return;
-                    }
-                }
-            } else if (route.autoindex) {
-                // Generate directory listing
-                std::string listing = generateDirectoryListing(file_path, url);
-                // Build and send response
-                std::ostringstream response_stream;
-                response_stream << "HTTP/1.1 200 OK\r\n";
-                response_stream << "Content-Type: text/html\r\n";
-                response_stream << "Content-Length: " << listing.size() << "\r\n";
-                response_stream << "\r\n";
-                response_stream << listing;
-                client.response = response_stream.str();
-                client.response_ready = true;
-                return;
-            } else {
-                // No index file and autoindex is off
-                std::string response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                client.response = response;
-                client.response_ready = true;
-                return;
-            }
-        }
-
-        // Read the file content
-        std::ifstream file(file_path.c_str(), std::ios::binary);
-        if (!file.is_open()) {
-            // perror("ifstream"); // Do not use perror as it uses errno
-            std::cerr << "Failed to open file: " << file_path << std::endl;
-            std::string response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            client.response = response;
-            client.response_ready = true;
-            return;
-        }
-
-        std::ostringstream oss;
-        oss << file.rdbuf();
-        std::string file_content = oss.str();
-        file.close();
-
-        // Determine the Content-Type
-        std::string content_type = getMimeType(file_path);
-
-        // Construct the HTTP response
-        std::ostringstream response_stream;
-        response_stream << "HTTP/1.1 200 OK\r\n";
-        response_stream << "Content-Type: " << content_type << "\r\n";
-        response_stream << "Content-Length: " << file_content.size() << "\r\n";
-        response_stream << "\r\n";
-        response_stream << file_content;
-
-        client.response = response_stream.str();
-        client.response_ready = true;
+    if (!route.cgi_path.empty()) {
+        std::cout << "CGI path found, handling CGI request" << std::endl;
+        handleCGI(client.fd);
         return;
     }
 
-    // If the method is not supported
-    std::string response = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    std::string file_path = constructFilePath(route, client.url);
+    std::cout << "Constructed file path: " << file_path << std::endl;
+
+    struct stat file_stat;
+    if (stat(file_path.c_str(), &file_stat) == -1) {
+        std::cout << "File not found: " << file_path << std::endl;
+        sendErrorResponse(client, 404);
+        return;
+    }
+
+    if (S_ISDIR(file_stat.st_mode)) {
+        std::cout << "Path is a directory, handling directory request" << std::endl;
+        handleDirectoryRequest(client, file_path);
+    } else {
+        std::cout << "Path is a file, sending file response" << std::endl;
+        sendFileResponse(client, file_path);
+    }
+}
+
+void WebServer::handlePostRequest(ClientConnection &client) {
+    const RouteConfig &route = *client.route;
+
+    if (client.content_type.find("multipart/form-data") != std::string::npos) {
+        handleFileUpload(client);
+    } else if (!route.cgi_path.empty()) {
+        handleCGI(client.fd);
+    } else {
+        // Handle other POST requests
+        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        client.response = response;
+        client.response_ready = true;
+    }
+}
+
+void WebServer::handleDeleteRequest(ClientConnection &client) {
+    const RouteConfig &route = *client.route;
+    std::string file_path = constructFilePath(route, client.url);
+
+    if (remove(file_path.c_str()) == 0) {
+        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        client.response = response;
+    } else {
+        sendErrorResponse(client, 404);
+    }
+    client.response_ready = true;
+}
+
+void WebServer::handlePutRequest(ClientConnection &client) {
+    const RouteConfig &route = *client.route;
+    std::string upload_path = route.upload_dir + client.url.substr(route.url.size());
+
+    // Create directories if they do not exist
+    size_t last_slash_pos = upload_path.find_last_of('/');
+    if (last_slash_pos != std::string::npos) {
+        std::string dir_path = upload_path.substr(0, last_slash_pos);
+        if (dir_path.find("..") != std::string::npos) {
+            sendErrorResponse(client, 400);
+            return;
+        }
+        mkdir(dir_path.c_str(), 0755);
+    }
+
+    std::ofstream outfile(upload_path.c_str(), std::ios::binary);
+    if (!outfile.is_open()) {
+        sendErrorResponse(client, 500);
+        return;
+    }
+
+    outfile << client.body;
+    outfile.close();
+
+    std::string response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     client.response = response;
     client.response_ready = true;
 }
 
+void WebServer::handleDirectoryRequest(ClientConnection &client, const std::string &dir_path) {
+    const RouteConfig &route = *client.route;
+    std::string index = route.index;
+
+    if (route.index.empty()) { index = "index.html";}
+
+    if (!index.empty()) {
+        std::string index_path = dir_path + "/" + index;
+        struct stat index_stat;
+        if (stat(index_path.c_str(), &index_stat) != -1) {
+            sendFileResponse(client, index_path);
+            return;
+        } else {
+            if (!route.autoindex) {
+                sendErrorResponse(client,404);
+                return;
+            }
+        }
+    }
+
+    if (route.autoindex) {
+        std::string listing = generateDirectoryListing(dir_path, client.url);
+        std::ostringstream response_stream;
+        response_stream << "HTTP/1.1 200 OK\r\n";
+        response_stream << "Content-Type: text/html\r\n";
+        response_stream << "Content-Length: " << listing.size() << "\r\n";
+        response_stream << "\r\n";
+        response_stream << listing;
+        client.response = response_stream.str();
+        client.response_ready = true;
+    } else {
+        sendErrorResponse(client, 403);
+    }
+}
+
+void WebServer::sendFileResponse(ClientConnection &client, const std::string &file_path) {
+    std::cout << "Sending file response for: " << file_path << std::endl;
+
+    std::ifstream file(file_path.c_str(), std::ios::binary);
+    if (!file.is_open()) {
+        std::cout << "Failed to open file: " << file_path << std::endl;
+        sendErrorResponse(client, 403);
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << file.rdbuf();
+    std::string file_content = oss.str();
+    file.close();
+
+    std::string content_type = getMimeType(file_path);
+
+    std::ostringstream response_stream;
+    response_stream << "HTTP/1.1 200 OK\r\n";
+    response_stream << "Content-Type: " << content_type << "\r\n";
+    response_stream << "Content-Length: " << file_content.size() << "\r\n";
+    response_stream << "\r\n";
+    response_stream << file_content;
+
+    client.response = response_stream.str();
+    client.response_ready = true;
+
+    std::cout << "File response prepared. Size: " << client.response.size() << " bytes" << std::endl;
+
+    // Add POLLOUT event for the client's fd
+    for (int i = 0; i < nfds; ++i) {
+        if (fds[i].fd == client.fd) {
+            fds[i].events |= POLLOUT;
+            std::cout << "Added POLLOUT event for client fd: " << client.fd << std::endl;
+            break;
+        }
+    }
+}
+
+void WebServer::sendErrorResponse(ClientConnection &client, int status_code, const std::string &additional_headers) {
+    const ServerConfig &server_config = configs[client_server_map[client.fd]];
+    std::string error_body = getErrorPage(server_config, status_code);
+    if (error_body.empty()) {
+        error_body = getDefaultErrorPage(status_code);
+    }
+
+    std::ostringstream response_stream;
+    response_stream << "HTTP/1.1 " << status_code << " " << getStatusText(status_code) << "\r\n";
+    response_stream << "Content-Type: text/html\r\n";
+    response_stream << "Content-Length: " << error_body.size() << "\r\n";
+    if (!additional_headers.empty()) {
+        response_stream << additional_headers;
+    }
+    response_stream << "Connection: close\r\n\r\n";
+    response_stream << error_body;
+
+    client.response = response_stream.str();
+    client.response_ready = true;
+
+    // Add POLLOUT event for the client's fd
+    for (int i = 0; i < nfds; ++i) {
+        if (fds[i].fd == client.fd) {
+            fds[i].events |= POLLOUT;
+            std::cout << "Added POLLOUT event for client fd: " << client.fd << std::endl;
+            break;
+        }
+    }
+}
+
 void WebServer::handleCGI(int client_fd) {
-    std::cout << "handleCGI called for client_fd: " << client_fd << std::endl;
     ClientConnection &client = clients[client_fd];
     const RouteConfig &route = *client.route;
-    std::string request_body = client.body;
-    std::string method = client.method;
-    std::string query_string = client.query_string;
-    std::string content_length = intToString(request_body.size());
-    std::string content_type = client.content_type;
-    std::string url = client.url;
+
+    std::cout << "Handling CGI for client_fd: " << client_fd << std::endl;
 
     int cgi_output[2];
     int cgi_input[2];
 
     if (pipe(cgi_output) < 0 || pipe(cgi_input) < 0) {
-        // perror("pipe"); // Do not use perror as it uses errno
         std::cerr << "Failed to create pipes for CGI" << std::endl;
-        std::string error_response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
-        client.response = error_response;
-        client.response_ready = true;
+        sendErrorResponse(client, 500);
         return;
     }
 
-    fcntl(cgi_input[1], F_SETFL, O_NONBLOCK);
-    fcntl(cgi_output[0], F_SETFL, O_NONBLOCK);
+    std::cout << "Pipes created successfully" << std::endl;
 
     pid_t pid = fork();
     if (pid < 0) {
-        // perror("fork"); // Do not use perror as it uses errno
         std::cerr << "Failed to fork for CGI" << std::endl;
-        std::string error_response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
-        client.response = error_response;
-        client.response_ready = true;
+        sendErrorResponse(client, 500);
         return;
     }
 
     if (pid == 0) {
         // Child process
-        dup2(cgi_output[1], STDOUT_FILENO);
-        dup2(cgi_input[0], STDIN_FILENO);
-        close(cgi_output[0]);
+        std::cout << "CGI child process started" << std::endl;
+
+        close(cgi_output[0]); // Close read end
+        close(cgi_input[1]);  // Close write end
+
+        dup2(cgi_output[1], STDOUT_FILENO); // Redirect stdout to cgi_output[1]
+        dup2(cgi_input[0], STDIN_FILENO);   // Redirect stdin to cgi_input[0]
+
         close(cgi_output[1]);
         close(cgi_input[0]);
-        close(cgi_input[1]);
 
-        // Prepare environment variables
-        std::string path_info = url;
-        std::string path_translated = route.root + path_info;
+        // Set up environment variables
 
-        std::vector<std::string> env_vars;
-        env_vars.push_back("REQUEST_METHOD=" + method);
-        env_vars.push_back("QUERY_STRING=" + query_string);
-        env_vars.push_back("CONTENT_LENGTH=" + content_length);
-        env_vars.push_back("CONTENT_TYPE=" + content_type);
-        env_vars.push_back("SERVER_PROTOCOL=HTTP/1.1");
-        env_vars.push_back("GATEWAY_INTERFACE=CGI/1.1");
-        env_vars.push_back("REMOTE_ADDR=");
-        env_vars.push_back("PATH_INFO=" + path_info);
-        env_vars.push_back("PATH_TRANSLATED=" + path_translated);
-        env_vars.push_back("PATH=/usr/bin:/bin:/usr/local/bin");
-        env_vars.push_back("HTTP_X_SECRET_HEADER_FOR_TEST=1");
-        env_vars.push_back("REDIRECT_STATUS=200");
+        // Extract the script name from the URL
+        std::string script_name = client.url.substr(client.url.find_last_of('/') + 1);
 
-        std::vector<char*> env;
-        for (size_t i = 0; i < env_vars.size(); ++i) {
-            env.push_back(const_cast<char*>(env_vars[i].c_str()));
+        setenv("REQUEST_METHOD", client.method.c_str(), 1);
+        setenv("QUERY_STRING", client.query_string.c_str(), 1);
+        setenv("CONTENT_LENGTH", intToString(client.body.size()).c_str(), 1);
+        setenv("CONTENT_TYPE", client.content_type.c_str(), 1);
+        setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
+        setenv("GATEWAY_INTERFACE", "CGI/1.1", 1);
+
+        // Corrected SCRIPT_NAME and PATH_INFO
+ //       setenv("SCRIPT_NAME", client.url.c_str(), 1);
+ //       setenv("PATH_INFO", client.url.c_str(), 1);
+  //      setenv("PATH_INFO", "youpi.bla", 1);
+        setenv("PATH_INFO", script_name.c_str(), 1);
+
+        // Set PATH_TRANSLATED to map PATH_INFO to a physical path
+        std::string path_translated = route.root + client.url;
+        setenv("PATH_TRANSLATED", path_translated.c_str(), 1);
+
+        // Additional environment variables
+        setenv("SERVER_NAME", "localhost", 1);
+        setenv("SERVER_PORT", intToString(configs[client_server_map[client.fd]].port).c_str(), 1);
+        setenv("REMOTE_ADDR", "127.0.0.1", 1);
+        setenv("REDIRECT_STATUS", "200", 1); // Some scripts expect this to be set
+
+        setenv("HTTP_X_SECRET_HEADER_FOR_TEST", "1", 1);
+
+        // Change the working directory if necessary
+        std::string script_dir = route.cgi_path.substr(0, route.cgi_path.find_last_of("/"));
+        if (!script_dir.empty() && chdir(script_dir.c_str()) != 0) {
+            std::cerr << "Failed to change directory to: " << script_dir << std::endl;
         }
-        env.push_back(NULL);
 
         // Execute the CGI script
         char *args[] = {const_cast<char *>(route.cgi_path.c_str()), NULL};
+        execve(route.cgi_path.c_str(), args, environ);
 
-        execve(route.cgi_path.c_str(), args, &env[0]);
-        // perror("execve"); // Do not use perror as it uses errno
+        // If execve fails
         std::cerr << "Failed to execve CGI script: " << route.cgi_path << std::endl;
         exit(EXIT_FAILURE);
     } else {
         // Parent process
-        close(cgi_output[1]);
-        close(cgi_input[0]);
+        std::cout << "CGI parent process continuing" << std::endl;
+        close(cgi_output[1]); // Close write end
+        close(cgi_input[0]);  // Close read end
+
+        fcntl(cgi_output[0], F_SETFL, O_NONBLOCK);
+        fcntl(cgi_input[1], F_SETFL, O_NONBLOCK);
 
         // Store CGI state in client connection
         client.cgi_pid = pid;
         client.cgi_input_fd = cgi_input[1];
         client.cgi_output_fd = cgi_output[0];
         client.total_cgi_input_written = 0;
-        client.request_body = request_body; // Ensure the body is stored
         client.cgi_output = "";
 
         // Add the CGI fds to the pollfd array
         addFdToPoll(client.cgi_input_fd, POLLOUT);
         addFdToPoll(client.cgi_output_fd, POLLIN);
+
+        std::cout << "CGI setup complete. Input fd: " << client.cgi_input_fd << ", Output fd: " << client.cgi_output_fd << std::endl;
+    }
+}
+
+void WebServer::setupCGIEnvironment(ClientConnection &client) {
+    const RouteConfig &route = *client.route;
+
+    setenv("REQUEST_METHOD", client.method.c_str(), 1);
+    setenv("QUERY_STRING", client.query_string.c_str(), 1);
+    setenv("CONTENT_LENGTH", intToString(client.body.size()).c_str(), 1);
+    setenv("CONTENT_TYPE", client.content_type.c_str(), 1);
+    setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
+    setenv("GATEWAY_INTERFACE", "CGI/1.1", 1);
+    setenv("REMOTE_ADDR", "", 1);
+    setenv("PATH_INFO", client.url.c_str(), 1);
+    setenv("PATH_TRANSLATED", (route.root + client.url).c_str(), 1);
+    setenv("SCRIPT_NAME", route.cgi_path.c_str(), 1);
+    setenv("DOCUMENT_ROOT", route.root.c_str(), 1);
+    setenv("SERVER_NAME", "webserv", 1);
+    setenv("SERVER_PORT", intToString(configs[client_server_map[client.fd]].port).c_str(), 1);
+    setenv("REDIRECT_STATUS", "200", 1);
+
+    // Change the working directory to the script's directory
+    std::string script_dir = route.cgi_path.substr(0, route.cgi_path.find_last_of("/"));
+    if (chdir(script_dir.c_str()) != 0) {
+        std::cerr << "Failed to change directory to: " << script_dir << std::endl;
     }
 }
 
 void WebServer::handleCGIWrite(int cgi_input_fd) {
-     std::cout << "handleCGIWrite called for cgi_input_fd: " << cgi_input_fd << std::endl;
-    // Find the client associated with this cgi_input_fd
     ClientConnection *client = findClientByCGIFD(cgi_input_fd);
     if (!client) return;
 
-    size_t to_write = client->request_body.size() - client->total_cgi_input_written;
+    size_t to_write = client->body.size() - client->total_cgi_input_written;
     if (to_write > 0) {
-        ssize_t written = write(cgi_input_fd, client->request_body.c_str() + client->total_cgi_input_written, to_write);
+        ssize_t written = write(cgi_input_fd, client->body.c_str() + client->total_cgi_input_written, to_write);
         if (written > 0) {
             client->total_cgi_input_written += written;
-            if (client->total_cgi_input_written == client->request_body.size()) {
-                // Finished writing to CGI
+            if (client->total_cgi_input_written == client->body.size()) {
                 close(cgi_input_fd);
                 client->cgi_input_fd = -1;
                 removeFdFromPoll(cgi_input_fd);
             }
-        } else {
-            // written <= 0: Either an error occurred or write would block
-            // Since we can't check errno, we'll wait for the next POLLOUT event
-            // Do not close the fd here; just return and wait
         }
     } else {
-        // No more data to write; close the fd
         close(cgi_input_fd);
         client->cgi_input_fd = -1;
         removeFdFromPoll(cgi_input_fd);
@@ -810,221 +912,270 @@ void WebServer::handleCGIWrite(int cgi_input_fd) {
 }
 
 void WebServer::handleCGIRead(int cgi_output_fd) {
-    // Find the client associated with this cgi_output_fd
-    WebServer::ClientConnection *client = findClientByCGIFD(cgi_output_fd);
-    if (!client) return;
+    ClientConnection *client = findClientByCGIFD(cgi_output_fd);
+    if (!client) {
+        std::cerr << "No client found for CGI output fd: " << cgi_output_fd << std::endl;
+        // Close and remove the fd since it's no longer associated with a client
+        close(cgi_output_fd);
+        removeFdFromPoll(cgi_output_fd);
+        return;
+    }
+
+    std::cout << "Handling CGI read for fd: " << cgi_output_fd << std::endl;
 
     char buffer[BUFFER_SIZE];
-    ssize_t nbytes = read(cgi_output_fd, buffer, sizeof(buffer));
+    ssize_t total_read = 0;
 
-    if (nbytes > 0) {
-        client->cgi_output.append(buffer, nbytes);
-        // Debug messages
-        std::cout << "Read " << nbytes << " bytes from CGI output_fd: " << cgi_output_fd << std::endl;
-        std::cout << "Data: " << std::string(buffer, nbytes) << std::endl;
-    } else {
-        // Either EOF or error
-        std::cout << "EOF or error on CGI output_fd: " << cgi_output_fd << std::endl;
-        close(cgi_output_fd);
-        client->cgi_output_fd = -1;
-        removeFdFromPoll(cgi_output_fd);
+    while (true) {
+        ssize_t nbytes = read(cgi_output_fd, buffer, sizeof(buffer));
 
-        // Wait for the CGI process to exit
-        waitpid(client->cgi_pid, NULL, 0);
-
-        // Construct the HTTP response
-        std::string status_line = "HTTP/1.1 200 OK\r\n";
-        client->response = status_line + client->cgi_output;
-        client->response_ready = true;
-        std::cout << "Response ready for client_fd: " << client->fd << std::endl;
+        if (nbytes > 0) {
+            std::cout << "Read " << nbytes << " bytes from CGI output" << std::endl;
+            client->cgi_output.append(buffer, nbytes);
+            total_read += nbytes;
+        } else if (nbytes == 0) {
+            // EOF reached
+            std::cout << "CGI output ended for fd: " << cgi_output_fd << std::endl;
+            break;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // No more data available right now, but the pipe is still open
+                std::cout << "No more CGI data available at the moment" << std::endl;
+                return;
+            } else {
+                // Error occurred
+                std::cerr << "Error reading from CGI output fd: " << cgi_output_fd << ": " << strerror(errno) << std::endl;
+                break;
+            }
+        }
     }
+
+    // Close and clean up the CGI output file descriptor
+    close(cgi_output_fd);
+    client->cgi_output_fd = -1;
+    removeFdFromPoll(cgi_output_fd);
+
+    // Wait for the CGI process to exit and clean up
+    if (client->cgi_pid != -1) {
+        int status;
+        waitpid(client->cgi_pid, &status, 0);
+        std::cout << "CGI process exited with status: " << status << std::endl;
+        client->cgi_pid = -1;
+    }
+
+    // Process CGI output and prepare the response
+    processCGIOutput(*client);
+
+    // Mark the response as ready to be sent
+    client->response_ready = true;
+
+    // Add POLLOUT event for the client's fd to send the response
+    for (int j = 0; j < nfds; ++j) {
+        if (fds[j].fd == client->fd) {
+            fds[j].events |= POLLOUT;
+            std::cout << "Added POLLOUT event for client fd: " << client->fd << std::endl;
+            break;
+        }
+    }
+
+    std::cout << "CGI response ready to be sent for client fd: " << client->fd << std::endl;
 }
 
-void WebServer::handleFileUpload(int client_fd) {
-    ClientConnection &client = clients[client_fd];
+void WebServer::processCGIOutput(ClientConnection &client) {
+    std::cout << "Processing CGI output for client fd: " << client.fd << std::endl;
+    std::cout << "CGI output size: " << client.cgi_output.size() << " bytes" << std::endl;
+
+    if (client.cgi_output.empty()) {
+        std::cout << "CGI output is empty, sending error response" << std::endl;
+        sendErrorResponse(client, 500);
+        return;
+    }
+
+    // Find the end of headers (\r\n\r\n)
+    size_t header_end = client.cgi_output.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        std::cout << "Malformed CGI output: Headers not terminated correctly" << std::endl;
+        sendErrorResponse(client, 500);
+        return;
+    }
+
+    // Extract headers and body
+    std::string headers = client.cgi_output.substr(0, header_end);
+    std::string body = client.cgi_output.substr(header_end + 4); // Skip "\r\n\r\n"
+
+    std::cout << "CGI Headers:\n" << headers << std::endl;
+    std::cout << "CGI Body (first 100 bytes):\n" << body.substr(0, 100) << std::endl;
+
+    // Check if Content-Type is already present
+    bool has_content_type = false;
+    std::istringstream header_stream(headers);
+    std::string line;
+    while (std::getline(header_stream, line)) {
+        // Remove any trailing '\r'
+        if (!line.empty() && line[line.size() - 1] == '\r') {
+            line.erase(line.size() - 1);
+        }
+
+        if (line.find("Content-Type:") != std::string::npos) {
+            has_content_type = true;
+            break;
+        }
+    }
+
+    std::ostringstream response_stream;
+    response_stream << "HTTP/1.1 200 OK\r\n";
+
+    if (!has_content_type) {
+        response_stream << "Content-Type: text/html\r\n";
+    }
+
+    // Append CGI headers
+    response_stream << headers << "\r\n"; // Ensure headers end with CRLF
+
+    // Append Content-Length
+    response_stream << "Content-Length: " << body.size() << "\r\n";
+    response_stream << "\r\n"; // End of headers
+
+    // Append body
+    response_stream << body;
+
+    client.response = response_stream.str();
+    client.response_ready = true;
+
+    std::cout << "CGI response prepared. Size: " << client.response.size() << " bytes" << std::endl;
+    std::cout << "CGI response headers:\n" << headers << std::endl;
+    std::cout << "CGI response body (first 100 bytes):\n" << body.substr(0, 100) << std::endl;
+}
+
+
+void WebServer::handleFileUpload(ClientConnection &client) {
+    std::cout << "Handling file upload for client fd: " << client.fd << std::endl;
+    std::cout << "Request body size: " << client.body.size() << " bytes" << std::endl;
+    std::cout << "Content-Type: " << client.content_type << std::endl;
+
     const RouteConfig &route = *client.route;
 
-    // Extract boundary from Content-Type header
-    std::string boundary_prefix = "boundary=";
-    size_t boundary_pos = client.content_type.find(boundary_prefix);
-    if (boundary_pos == std::string::npos) {
-        std::cerr << "Boundary not found in Content-Type header" << std::endl;
-        client.response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
-        client.response_ready = true;
+    if (client.body.empty()) {
+        std::cout << "Empty request body, sending 400 Bad Request" << std::endl;
+        sendErrorResponse(client, 400);
         return;
     }
-    std::string boundary = "--" + client.content_type.substr(boundary_pos + boundary_prefix.length());
-    std::string end_boundary = boundary + "--";
 
-    // Find the start of the body
-    size_t body_start = client.request.find("\r\n\r\n");
-    if (body_start == std::string::npos) {
-        std::cerr << "Headers and body separator not found" << std::endl;
-        client.response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
-        client.response_ready = true;
-        return;
-    }
-    body_start += 4; // Move past the "\r\n\r\n"
+    std::string filename;
+    std::string file_content;
 
-    // Extract the body
-    std::string body = client.request.substr(body_start);
-
-    // Find the first boundary in the body
-    size_t pos = body.find(boundary);
-    if (pos == std::string::npos) {
-        std::cerr << "Initial boundary not found in body" << std::endl;
-        client.response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
-        client.response_ready = true;
-        return;
-    }
-    pos += boundary.length() + 2; // Move past the boundary and "\r\n"
-
-    while (pos < body.size()) {
-        // Find the end of the headers
-        size_t header_end = body.find("\r\n\r\n", pos);
-        if (header_end == std::string::npos) {
-            std::cerr << "Header end not found in body" << std::endl;
-            break;
+    if (client.chunked_encoding || client.content_type == "application/x-www-form-urlencoded") {
+        // For chunked uploads or url-encoded data, generate a filename
+        std::ostringstream filename_stream;
+        filename_stream << "upload_" << time(NULL);
+        
+        // Try to add an appropriate extension based on the Content-Type
+        if (client.content_type == "application/json") {
+            filename_stream << ".json";
+        } else if (client.content_type == "text/plain") {
+            filename_stream << ".txt";
+        } else if (client.content_type == "application/xml") {
+            filename_stream << ".xml";
         }
-
-        // Extract headers
-        std::string headers = body.substr(pos, header_end - pos);
-        pos = header_end + 4;
-
-        // Extract filename
-        size_t filename_pos = headers.find("filename=\"");
-        if (filename_pos == std::string::npos) {
-            std::cerr << "Filename not found in headers" << std::endl;
-            break;
-        }
-        size_t filename_start = filename_pos + 10;
-        size_t filename_end = headers.find("\"", filename_start);
-        if (filename_end == std::string::npos) {
-            std::cerr << "Filename end quote not found" << std::endl;
-            break;
-        }
-        std::string filename = headers.substr(filename_start, filename_end - filename_start);
-
-        // Extract file content
-        size_t content_end = body.find(boundary, pos);
-        if (content_end == std::string::npos) {
-            std::cerr << "Content end boundary not found" << std::endl;
-            break;
-        }
-        size_t content_length = content_end - pos - 2; // Exclude trailing "\r\n"
-        std::string file_content = body.substr(pos, content_length);
-
-        // Save the file
-        std::string filepath = route.upload_dir + "/" + filename;
-        std::ofstream outfile(filepath.c_str(), std::ios::binary);
-        if (!outfile.is_open()) {
-            std::cerr << "Failed to open file for writing: " << filepath << std::endl;
-            client.response = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n";
-            client.response_ready = true;
+        // Add more content types as needed
+        
+        filename = filename_stream.str();
+        file_content = client.body;
+    } else if (client.content_type.find("multipart/form-data") != std::string::npos) {
+        // For multipart form-data, extract filename and content
+        std::string boundary_prefix = "boundary=";
+        size_t boundary_pos = client.content_type.find(boundary_prefix);
+        if (boundary_pos == std::string::npos) {
+            std::cerr << "Boundary not found in Content-Type header" << std::endl;
+            sendErrorResponse(client, 400);
             return;
         }
-        outfile.write(file_content.c_str(), file_content.size());
-        outfile.close();
+        std::string boundary = "--" + client.content_type.substr(boundary_pos + boundary_prefix.length());
 
-        std::cerr << "File saved: " << filepath << std::endl;
-
-        // Move past the content to the next boundary
-        pos = content_end + boundary.length();
-        if (body.compare(pos, 2, "--") == 0) {
-            // Reached the end boundary
-            break;
+        size_t pos = client.body.find("filename=\"");
+        if (pos != std::string::npos) {
+            size_t filename_start = pos + 10;
+            size_t filename_end = client.body.find("\"", filename_start);
+            filename = client.body.substr(filename_start, filename_end - filename_start);
+        } else {
+            filename = "uploaded_file_" + intToString(time(NULL));
         }
-        pos += 2; // Move past "\r\n"
-    }
 
-    // Send response
-    std::string response_body = "<html><body><h1>File Uploaded Successfully</h1></body></html>";
-    std::ostringstream oss;
-    oss << response_body.size();
-    std::string response = "HTTP/1.1 200 OK\r\n";
-    response += "Content-Type: text/html\r\n";
-    response += "Content-Length: " + oss.str() + "\r\n";
-    response += "\r\n";
-    response += response_body;
-    client.response = response;
-    client.response_ready = true;
-}
-
-void WebServer::handleDeleteRequest(int client_fd) {
-    WebServer::ClientConnection &client = clients[client_fd];
-    const RouteConfig &route = *client.route;
-    std::string url = client.url;
-    std::string file_path;
-
-    // Construct the file path
-    file_path = route.upload_dir + url.substr(route.url.size());
-
-    // Sanitize the file path to prevent directory traversal
-    if (file_path.find("..") != std::string::npos) {
-        std::cerr << "Invalid file path: " << file_path << std::endl;
-        std::string response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        client.response = response;
-        client.response_ready = true;
+        size_t content_start = client.body.find("\r\n\r\n");
+        if (content_start != std::string::npos) {
+            content_start += 4;
+            size_t content_end = client.body.rfind(boundary) - 2;
+            if (content_end > content_start) {
+                file_content = client.body.substr(content_start, content_end - content_start);
+            }
+        }
+    } else {
+        std::cerr << "Unsupported Content-Type for file upload" << std::endl;
+        sendErrorResponse(client, 400);
         return;
     }
 
-    // Attempt to delete the file
-    if (remove(file_path.c_str()) == 0) {
-        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        client.response = response;
-    } else {
-        std::cerr << "Failed to delete file: " << file_path << std::endl;
-        std::string response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        client.response = response;
+    std::string filepath = route.upload_dir + "/" + filename;
+    std::ofstream outfile(filepath.c_str(), std::ios::binary);
+    if (!outfile.is_open()) {
+        std::cerr << "Failed to open file for writing: " << filepath << std::endl;
+        sendErrorResponse(client, 500);
+        return;
     }
+    
+    outfile.write(file_content.c_str(), file_content.size());
+    outfile.close();
+
+    std::cout << "File saved: " << filepath << std::endl;
+
+    // Send response
+    std::string response_body = "<html><body><h1>File Uploaded Successfully</h1><p>Saved as: " + filename + "</p></body></html>";
+    std::ostringstream oss;
+    oss << "HTTP/1.1 200 OK\r\n";
+    oss << "Content-Type: text/html\r\n";
+    oss << "Content-Length: " << response_body.size() << "\r\n";
+    oss << "Connection: close\r\n";
+    oss << "\r\n";
+    oss << response_body;
+    client.response = oss.str();
     client.response_ready = true;
-}
 
-std::string WebServer::intToString(int value) {
-    std::stringstream ss;
-    ss << value;
-    return ss.str();
-}
+    std::cout << "File upload response prepared. Size: " << client.response.size() << " bytes" << std::endl;
 
-std::string WebServer::getMimeType(const std::string &path) {
-    if (path.find(".html") != std::string::npos) return "text/html";
-    if (path.find(".css") != std::string::npos) return "text/css";
-    if (path.find(".js") != std::string::npos) return "application/javascript";
-    if (path.find(".png") != std::string::npos) return "image/png";
-    if (path.find(".jpg") != std::string::npos) return "image/jpeg";
-    return "text/plain";
-}
-
-std::string WebServer::getErrorPage(const ServerConfig &config, int status_code) {
-    std::map<int, std::string>::const_iterator it = config.error_pages.find(status_code);
-    if (it != config.error_pages.end()) {
-        std::ifstream error_file(it->second.c_str());
-        if (error_file.is_open()) {
-            std::stringstream buffer;
-            buffer << error_file.rdbuf();
-            return buffer.str();
+    // Add POLLOUT event for the client's fd
+    for (int i = 0; i < nfds; ++i) {
+        if (fds[i].fd == client.fd) {
+            fds[i].events |= POLLOUT;
+            std::cout << "Added POLLOUT event for client fd: " << client.fd << std::endl;
+            break;
         }
     }
-    return "";
 }
 
-std::string WebServer::getStatusText(int status_code) {
-    switch (status_code) {
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 413: return "Payload Too Large";
-        case 500: return "Internal Server Error";
-        default: return "";
+std::string WebServer::constructFilePath(const RouteConfig &route, const std::string &url) {
+    std::string file_path;
+    if (!route.alias.empty()) {
+        file_path = route.alias;
+        std::string remaining_url = url.substr(route.url.size());
+        if (!remaining_url.empty() && remaining_url[0] == '/') {
+            remaining_url = remaining_url.substr(1);
+        }
+        if (!file_path.empty() && file_path[file_path.size() - 1] != '/' && !remaining_url.empty()) {
+            file_path += "/";
+        }
+        file_path += remaining_url;
+    } else {
+        file_path = route.root;
+        std::string remaining_url = url.substr(route.url.size());
+        if (!remaining_url.empty() && remaining_url[0] == '/') {
+            remaining_url = remaining_url.substr(1);
+        }
+        if (!file_path.empty() && file_path[file_path.size() - 1] != '/' && !remaining_url.empty()) {
+            file_path += "/";
+        }
+        file_path += remaining_url;
     }
-}
-
-std::string WebServer::getDefaultErrorPage(int status_code) {
-    std::ostringstream oss;
-    oss << "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>"
-        << status_code << " " << getStatusText(status_code)
-        << "</title></head><body><h1>" << status_code << " "
-        << getStatusText(status_code) << "</h1><p>The requested method is not allowed for this resource.</p></body></html>";
-    return oss.str();
+    return file_path;
 }
 
 std::string WebServer::generateDirectoryListing(const std::string &path, const std::string &url) {
@@ -1042,20 +1193,109 @@ std::string WebServer::generateDirectoryListing(const std::string &path, const s
             if (entry_url[entry_url.size() - 1] != '/') {
                 entry_url += "/";
             }
-            if (entry_name != "." && entry_name != "..") {
-                entry_url += entry_name;
-            } else {
-                entry_url += entry_name;
-            }
+            entry_url += entry_name;
             listing << "<li><a href=\"" << entry_url << "\">" << entry_name << "</a></li>";
         }
         closedir(dir);
     } else {
-        // perror("opendir"); // Do not use perror as it uses errno
         std::cerr << "Failed to open directory: " << path << std::endl;
-        return getDefaultErrorPage(500);
+        return "";
     }
 
     listing << "</ul></body></html>";
     return listing.str();
+}
+
+std::string WebServer::getMimeType(const std::string &path) {
+    std::string extension = path.substr(path.find_last_of(".") + 1);
+    if (extension == "html" || extension == "htm") return "text/html";
+    if (extension == "css") return "text/css";
+    if (extension == "js") return "application/javascript";
+    if (extension == "jpg" || extension == "jpeg") return "image/jpeg";
+    if (extension == "png") return "image/png";
+    if (extension == "gif") return "image/gif";
+    return "application/octet-stream";
+}
+
+std::string WebServer::getErrorPage(const ServerConfig &config, int status_code) {
+    std::map<int, std::string>::const_iterator it = config.error_pages.find(status_code);
+    if (it != config.error_pages.end()) {
+        std::ifstream error_file(it->second.c_str());
+        if (error_file.is_open()) {
+            std::stringstream buffer;
+            buffer << error_file.rdbuf();
+            return buffer.str();
+        }
+    }
+    return "";
+}
+
+std::string WebServer::getDefaultErrorPage(int status_code) {
+    std::ostringstream oss;
+    oss << "<!DOCTYPE html><html><head><title>" << status_code << " " << getStatusText(status_code) << "</title></head>"
+        << "<body><h1>" << status_code << " " << getStatusText(status_code) << "</h1></body></html>";
+    return oss.str();
+}
+
+std::string WebServer::getStatusText(int status_code) {
+    switch (status_code) {
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 400: return "Bad Request";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 413: return "Payload Too Large";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        default: return "Unknown Status";
+    }
+}
+
+std::string WebServer::intToString(int value) {
+    std::ostringstream oss;
+    oss << value;
+    return oss.str();
+}
+
+void WebServer::handleDisconnection(int fd) {
+    std::cout << "Handling disconnection for fd: " << fd << std::endl;
+    
+    std::map<int, ClientConnection>::iterator it = clients.find(fd);
+    if (it != clients.end()) {
+        ClientConnection &client = it->second;
+        std::cout << "Disconnecting client on socket " << fd << std::endl;
+        
+        // Close client fd
+        close(fd);
+        removeFdFromPoll(fd);
+        
+        // Close CGI input fd if open
+        if (client.cgi_input_fd != -1) {
+            close(client.cgi_input_fd);
+            removeFdFromPoll(client.cgi_input_fd);
+            client.cgi_input_fd = -1;
+        }
+        
+        // Close CGI output fd if open
+        if (client.cgi_output_fd != -1) {
+            close(client.cgi_output_fd);
+            removeFdFromPoll(client.cgi_output_fd);
+            client.cgi_output_fd = -1;
+        }
+        
+        // Terminate CGI process if running
+        if (client.cgi_pid != -1) {
+            kill(client.cgi_pid, SIGKILL);
+            waitpid(client.cgi_pid, NULL, 0); // Wait for the process to terminate
+            client.cgi_pid = -1;
+        }
+        
+        clients.erase(it);
+    } else {
+        std::cout << "Closing non-client fd: " << fd << std::endl;
+        close(fd);
+        removeFdFromPoll(fd);
+    }
 }

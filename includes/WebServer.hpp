@@ -1,3 +1,4 @@
+// WebServer.hpp
 #ifndef WEBSERVER_HPP
 #define WEBSERVER_HPP
 
@@ -11,19 +12,13 @@ class WebServer {
 public:
     WebServer(const std::vector<ServerConfig> &configs);
     void run();
+
 private:
     std::vector<ServerConfig> configs;
     std::vector<int> server_fds;
     struct pollfd fds[1024];
     int nfds;
     std::map<int, int> client_server_map;
-
-    void bindSocket(int &server_fd, int port);
-    void handleClientRead(int fd);
-    void handleClientWrite(int fd);
-    void processRequest(int client_fd);
-    void setNonBlocking(int socket);
-    static bool is_closed_socket(const struct pollfd &pfd);
 
     struct ClientConnection {
         int fd;
@@ -42,38 +37,59 @@ private:
         std::string transfer_encoding;
         std::string body;
         const RouteConfig *route;
-        // Additional state for CGI handling
         pid_t cgi_pid;
         int cgi_input_fd;
         int cgi_output_fd;
         size_t total_cgi_input_written;
         std::string request_body;
         std::string cgi_output;
-        // For DELETE method
-        std::string file_path;
+        bool chunked_encoding;
+        size_t current_chunk_size;
+        bool chunk_size_received;
+        bool expect_100_continue;
     };
     std::map<int, ClientConnection> clients;
 
-    // Helper functions
-    static std::string intToString(int value);
-    static std::string getMimeType(const std::string &path);
-    static std::string getErrorPage(const ServerConfig &config, int status_code);
-    static std::string getStatusText(int status_code);
-    static std::string getDefaultErrorPage(int status_code);
-    static std::string generateDirectoryListing(const std::string &path, const std::string &url);
-
-    void handleCGI(int client_fd);
-    void handleCGIWrite(int cgi_input_fd);
-    void handleCGIRead(int cgi_output_fd);
-    void handleFileUpload(int client_fd);
-    void handleDeleteRequest(int client_fd);
-
-    // Additional helper functions
-    void parseRequestHeaders(ClientConnection &client);
-    bool isRequestComplete(ClientConnection &client);
-    ClientConnection* findClientByCGIFD(int fd);
+    void bindSocket(int &server_fd, int port);
+    void setNonBlocking(int socket);
+    static bool is_closed_socket(const struct pollfd &pfd);
     void addFdToPoll(int fd, short events);
     void removeFdFromPoll(int fd);
+    ClientConnection* findClientByCGIFD(int fd);
+
+    void handleNewConnection(int server_fd);
+    void handleClientRead(int client_fd);
+    void handleClientWrite(int client_fd);
+    void handleCGIRead(int cgi_output_fd);
+    void handleCGIWrite(int cgi_input_fd);
+    void handleDisconnection(int fd);
+
+    void parseRequestHeaders(ClientConnection &client);
+    bool isRequestComplete(ClientConnection &client);
+    void processChunkedRequest(ClientConnection &client);
+    void processRequest(int client_fd);
+
+    void handleGetRequest(ClientConnection &client);
+    void handlePostRequest(ClientConnection &client);
+    void handleDeleteRequest(ClientConnection &client);
+    void handlePutRequest(ClientConnection &client);
+    void handleDirectoryRequest(ClientConnection &client, const std::string &dir_path);
+    void handleFileUpload(ClientConnection &client);
+
+    void handleCGI(int client_fd);
+    void setupCGIEnvironment(ClientConnection &client);
+    void processCGIOutput(ClientConnection &client);
+
+    void sendFileResponse(ClientConnection &client, const std::string &file_path);
+    void sendErrorResponse(ClientConnection &client, int status_code, const std::string &additional_headers = "");
+
+    static std::string constructFilePath(const RouteConfig &route, const std::string &url);
+    static std::string generateDirectoryListing(const std::string &path, const std::string &url);
+    static std::string getMimeType(const std::string &path);
+    static std::string getErrorPage(const ServerConfig &config, int status_code);
+    static std::string getDefaultErrorPage(int status_code);
+    static std::string getStatusText(int status_code);
+    static std::string intToString(int value);
 };
 
 #endif // WEBSERVER_HPP
