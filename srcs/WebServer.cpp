@@ -798,7 +798,8 @@ void WebServer::handleCGI(int client_fd) {
         close(cgi_input[0]);
 
         // Set up environment variables
-
+        extern char **environ;
+        
         // Extract the script name from the URL
         std::string script_name = client.url.substr(client.url.find_last_of('/') + 1);
 
