@@ -1,4 +1,16 @@
-// WebServer.cpp
+/* ************************************************************************** */
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   WebServer.cpp                                      :+:      :+:    :+:   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: ipaslavs <marvin@42.fr>                    +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2024/10/21 16:30:15 by ipaslavs          #+#    #+#             */
+/*   Updated: 2024/10/21 16:30:20 by ipaslavs         ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+
+
 #include "WebServer.hpp"
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -164,7 +176,7 @@ void WebServer::run() {
                 } else {
                     handleCGIWrite(fd);
                 }
-            }
+            } 
 
             if (fds[i].revents & (POLLHUP | POLLERR)) {
                 std::cout << "POLLHUP or POLLERR event for fd: " << fd << std::endl;
