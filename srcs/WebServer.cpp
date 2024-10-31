@@ -268,7 +268,6 @@ void WebServer::handleClientRead(int client_fd) {
                 
                 if (client.expect_100_continue) {
                     std::string continue_response = "HTTP/1.1 100 Continue\r\n\r\n";
-                    send(client_fd, continue_response.c_str(), continue_response.length(), 0);
                     client.expect_100_continue = false;
                 }
             }
@@ -283,6 +282,7 @@ void WebServer::handleClientRead(int client_fd) {
             else if (client.content_length > 0)
             {
                 client.body += client.request;
+                client.request.clear(); // Clear after appending
                 if (client.body.size() >= client.content_length)
                 {
                     client.body = client.body.substr(0, client.content_length);
@@ -299,6 +299,7 @@ void WebServer::handleClientRead(int client_fd) {
         handleDisconnection(client_fd);
     } else {
         std::cerr << "Error reading from client on fd: " << client_fd << std::endl;
+        handleDisconnection(client_fd);
     }
 }
 
@@ -327,6 +328,7 @@ void WebServer::handleClientWrite(int client_fd) {
             handleDisconnection(client_fd);
         } else {
             std::cerr << "Error sending data to client " << client_fd << ": " << strerror(errno) << std::endl;
+            handleDisconnection(client_fd);
         }
     } else {
         std::cout << "No data to send to client " << client_fd << std::endl;
@@ -479,6 +481,15 @@ void WebServer::processRequest(int client_fd) {
     std::cout << "  Content-Type: " << client.content_type << std::endl;
     std::cout << "  Content-Length: " << client.content_length << std::endl;
 
+    // Wait until we have received all the data for POST/PUT requests
+    if (client.content_length > 0) {
+        if (client.body.size() < client.content_length) {
+            std::cout << "Waiting for more data. Current size: " << client.body.size() 
+                      << " Expected: " << client.content_length << std::endl;
+            return; // Wait for more data
+        }
+    }
+
     // Find the best matching route
     const RouteConfig *best_match_route = NULL;
     size_t longest_match_length = 0;
@@ -579,6 +590,21 @@ void WebServer::processRequest(int client_fd) {
         std::cout << "Unsupported method: " << method << std::endl;
         sendErrorResponse(client, 501); //501
     }
+
+    // After processing, reset the client state
+    client.headers_received = false;
+    client.body.clear();
+    client.request.clear();
+    client.content_length = 0;
+    client.method.clear();
+    client.url.clear();
+    client.http_version.clear();
+    client.content_type.clear();
+    client.query_string.clear();
+    client.transfer_encoding.clear();
+    client.chunked_encoding = false;
+    client.current_chunk_size = 0;
+    client.chunk_size_received = false;
 }
 
 void WebServer::handleGetRequest(ClientConnection &client) {
@@ -902,22 +928,52 @@ void WebServer::setupCGIEnvironment(ClientConnection &client) {
     }
 }
 
-void WebServer::handleCGIWrite(int cgi_input_fd) {
+void WebServer::handleCGIWrite(int cgi_input_fd) 
+{
     ClientConnection *client = findClientByCGIFD(cgi_input_fd);
-    if (!client) return;
+    if (!client) 
+    {
+        close(cgi_input_fd);
+        removeFdFromPoll(cgi_input_fd);
+        return;
+    }
 
-    size_t to_write = client->body.size() - client->total_cgi_input_written;
-    if (to_write > 0) {
-        ssize_t written = write(cgi_input_fd, client->body.c_str() + client->total_cgi_input_written, to_write);
-        if (written > 0) {
+    size_t remaining = client->body.size() - client->total_cgi_input_written;
+    if (remaining > 0) 
+    {
+        ssize_t written = write(cgi_input_fd, 
+                              client->body.c_str() + client->total_cgi_input_written, 
+                              remaining);
+
+        if (written > 0) 
+        {
             client->total_cgi_input_written += written;
-            if (client->total_cgi_input_written == client->body.size()) {
+            
+            // Check if all data has been written
+            if (client->total_cgi_input_written == client->body.size()) 
+            {
                 close(cgi_input_fd);
                 client->cgi_input_fd = -1;
                 removeFdFromPoll(cgi_input_fd);
             }
         }
-    } else {
+        else 
+        {
+            // Handle both error (written < 0) and connection closed (written == 0)
+            std::cout << "Error writing to CGI input fd: " << cgi_input_fd << std::endl;
+            
+            // Clean up CGI input
+            close(cgi_input_fd);
+            client->cgi_input_fd = -1;
+            removeFdFromPoll(cgi_input_fd);
+            
+            // Remove client
+            handleDisconnection(client->fd);
+        }
+    }
+    else 
+    {
+        // All data has been written
         close(cgi_input_fd);
         client->cgi_input_fd = -1;
         removeFdFromPoll(cgi_input_fd);
@@ -937,61 +993,68 @@ void WebServer::handleCGIRead(int cgi_output_fd) {
     std::cout << "Handling CGI read for fd: " << cgi_output_fd << std::endl;
 
     char buffer[BUFFER_SIZE];
-    ssize_t total_read = 0;
+    ssize_t nbytes = read(cgi_output_fd, buffer, sizeof(buffer));
 
-    while (true) {
-        ssize_t nbytes = read(cgi_output_fd, buffer, sizeof(buffer));
+    if (nbytes > 0) {
+        std::cout << "Read " << nbytes << " bytes from CGI output" << std::endl;
+        client->cgi_output.append(buffer, nbytes);
+    } else if (nbytes == 0) {
+        // EOF reached
+        std::cout << "CGI output ended for fd: " << cgi_output_fd << std::endl;
 
-        if (nbytes > 0) {
-            std::cout << "Read " << nbytes << " bytes from CGI output" << std::endl;
-            client->cgi_output.append(buffer, nbytes);
-            total_read += nbytes;
-        } else if (nbytes == 0) {
-            // EOF reached
-            std::cout << "CGI output ended for fd: " << cgi_output_fd << std::endl;
-            break;
-        } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // No more data available right now, but the pipe is still open
-                std::cout << "No more CGI data available at the moment" << std::endl;
-                return;
-            } else {
-                // Error occurred
-                std::cerr << "Error reading from CGI output fd: " << cgi_output_fd << ": " << strerror(errno) << std::endl;
+        // Close and clean up the CGI output file descriptor
+        close(cgi_output_fd);
+        client->cgi_output_fd = -1;
+        removeFdFromPoll(cgi_output_fd);
+
+        // Wait for the CGI process to exit and clean up
+        if (client->cgi_pid != -1) {
+            int status;
+            waitpid(client->cgi_pid, &status, 0);
+            std::cout << "CGI process exited with status: " << status << std::endl;
+            client->cgi_pid = -1;
+        }
+
+        // Process CGI output and prepare the response
+        processCGIOutput(*client);
+
+        // Mark the response as ready to be sent
+        client->response_ready = true;
+
+        // Add POLLOUT event for the client's fd to send the response
+        for (int j = 0; j < nfds; ++j) {
+            if (fds[j].fd == client->fd) {
+                fds[j].events |= POLLOUT;
+                std::cout << "Added POLLOUT event for client fd: " << client->fd << std::endl;
+                break;
+            }
+        }
+
+        std::cout << "CGI response ready to be sent for client fd: " << client->fd << std::endl;
+    } else {
+        // Error occurred
+        std::cerr << "Error reading from CGI output fd: " << cgi_output_fd << " - " << strerror(errno) << std::endl;
+
+        // Close and clean up
+        close(cgi_output_fd);
+        client->cgi_output_fd = -1;
+        removeFdFromPoll(cgi_output_fd);
+
+        // Send error response to the client
+        sendErrorResponse(*client, 500);
+
+        // Mark the response as ready to be sent
+        client->response_ready = true;
+
+        // Add POLLOUT event for the client's fd to send the response
+        for (int j = 0; j < nfds; ++j) {
+            if (fds[j].fd == client->fd) {
+                fds[j].events |= POLLOUT;
+                std::cout << "Added POLLOUT event for client fd: " << client->fd << std::endl;
                 break;
             }
         }
     }
-
-    // Close and clean up the CGI output file descriptor
-    close(cgi_output_fd);
-    client->cgi_output_fd = -1;
-    removeFdFromPoll(cgi_output_fd);
-
-    // Wait for the CGI process to exit and clean up
-    if (client->cgi_pid != -1) {
-        int status;
-        waitpid(client->cgi_pid, &status, 0);
-        std::cout << "CGI process exited with status: " << status << std::endl;
-        client->cgi_pid = -1;
-    }
-
-    // Process CGI output and prepare the response
-    processCGIOutput(*client);
-
-    // Mark the response as ready to be sent
-    client->response_ready = true;
-
-    // Add POLLOUT event for the client's fd to send the response
-    for (int j = 0; j < nfds; ++j) {
-        if (fds[j].fd == client->fd) {
-            fds[j].events |= POLLOUT;
-            std::cout << "Added POLLOUT event for client fd: " << client->fd << std::endl;
-            break;
-        }
-    }
-
-    std::cout << "CGI response ready to be sent for client fd: " << client->fd << std::endl;
 }
 
 void WebServer::processCGIOutput(ClientConnection &client) {
