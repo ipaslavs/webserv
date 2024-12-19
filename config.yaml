@@ -13,7 +13,6 @@ servers:
       - url: /form_submit
         methods: [GET, POST]
         root: ./web/www/example1/form_submit
-        index: index.html
       - url: /put_test
         methods: [PUT, GET]
         root: ./web/uploads/example1/put_test
@@ -31,7 +30,7 @@ servers:
         autoIndex: off
       - url: .bla
         methods: [POST, GET]
-        cgi_path: ./cgi_tester
+        cgi_path: ./ubuntu_cgi_tester
       - url: /upload_handler
         methods: [POST, DELETE]
         upload_dir: ./web/uploads/example1/upload_test
